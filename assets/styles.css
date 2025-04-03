@@ -1,0 +1,27 @@
+/* Changer l'arrière-plan de la page */
+body {
+    background-color: #F4F7FA;  /* Couleur de fond légère et moderne */
+  
+    background-size: cover;
+    background-position: center;
+}
+
+/* Personnalisation de la sidebar */
+.sidebar .sidebar-content {
+    background-color: #2E3B4E; /* Arrière-plan sombre pour la sidebar */
+    color: white;
+}
+
+/* Formulaire de login/signup */
+.stTextInput input {
+    font-size: 16px;
+    padding: 8px;
+}
+
+.stButton button {
+    background-color: #5C6BC0;
+    color: white;
+    font-weight: bold;
+    padding: 10px 15px;
+    border-radius: 5px;
+}
