@@ -163,7 +163,9 @@ navbar = dbc.Navbar(
         ], align="center", className="g-0"),
         dbc.Nav([
             dbc.NavItem(dbc.NavLink("Home", href="/", className="nav-link")),
-            dbc.NavItem(dbc.NavLink("Chatbot", href="/chatbot", className="nav-link")),
+            dbc.NavItem(dbc.NavLink("real-chatbot", href="/real-chatbot", className="nav-link")),
+            dbc.NavItem(dbc.NavLink("banque_reponse", href="/banque_reponse", className="nav-link")),
+            dbc.NavItem(dbc.NavLink("banque_question", href="/banque_question", className="nav-link")),
             dbc.NavItem(dbc.NavLink("Crypto Market", href="/portfolio", className="nav-link")),
             dbc.NavItem(dbc.NavLink("Resources", href="/resources", className="nav-link")),
             dbc.NavItem(dbc.Button("🔒 Login", className="login-button", href="#")),
