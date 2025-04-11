@@ -34,7 +34,7 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
     offload_buffers=True  # Reduce VRAM usage
 )
-model = torch.compile(model)  # 🚀 Speed up execution
+# model = torch.compile(model)  # 🚀 Speed up execution
 
 print("✅ Mistral-7B-v0.1 Model Loaded!")
 
@@ -140,7 +140,7 @@ def generate_rag_response(query, documents):
     # 🔥 Faster Response Generation
     try:
         with torch.no_grad():
-            output = model.generate(**inputs, max_new_tokens=30, num_beams=1, do_sample=False)
+            output = model.generate(**inputs, max_new_tokens=15, num_beams=1, do_sample=False)
         response = tokenizer.decode(output[0], skip_special_tokens=True)
     except torch.cuda.OutOfMemoryError:
         response = "⚠ GPU memory insufficient. Try reducing token limit."
