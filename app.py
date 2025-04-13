@@ -1,11 +1,27 @@
 import dash
-from dash import html, dcc
+from dash import html, dcc, Input, Output, State, no_update
 import dash_bootstrap_components as dbc
+from flask import session
+import bcrypt
+from pymongo import MongoClient
+import datetime
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG], use_pages=True)
 app.title = "Crypto Due Diligence"
 
-# Index HTML avec fond spatial animé et toutes les animations
+# Connexion à MongoDB
+try:
+    client = MongoClient("mongodb://localhost:27017/")
+    db = client["due_diligence_db"]
+    users_collection = db["users"]
+    print("Connexion à MongoDB réussie.")
+except Exception as e:
+    print(f"Erreur de connexion à MongoDB : {str(e)}")
+
+# Configurer Flask pour les sessions
+app.server.secret_key = "super_secret_key_123"  # Change en prod !
+
+# Index HTML
 app.index_string = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -44,19 +60,17 @@ app.index_string = '''
                 animation: starFlow 50s linear infinite;
                 z-index: -1;
             }
-           .navbar {
-    background: rgba(0, 0, 0, 0) !important; /* Transparence totale */
-    backdrop-filter: blur(15px);
-    padding: 15px 20px;
-    position: fixed;
-    top: 0;
-    width: 100%;
-    z-index: 1000;
-    border-bottom: none !important; /* Supprime toute bordure éventuelle */
-    box-shadow: none !important; /* Supprime toute ombre éventuelle */
-}
-
-
+            .navbar {
+                background: rgba(0, 0, 0, 0) !important;
+                backdrop-filter: blur(15px);
+                padding: 15px 20px;
+                position: fixed;
+                top: 0;
+                width: 100%;
+                z-index: 1000;
+                border-bottom: none !important;
+                box-shadow: none !important;
+            }
             .nav-link {
                 font-size: 1.2rem;
                 color: #ffffff !important;
@@ -154,34 +168,182 @@ app.index_string = '''
 </html>
 '''
 
-# Navbar modifiée en anglais
-navbar = dbc.Navbar(
-    dbc.Container([
-        dbc.Row([
-            dbc.Col(html.Img(src="/assets/Logo.png", height="100px"), width="auto"),
+# Vérification de connexion
+def is_user_logged_in():
+    return "user_id" in session
 
-        ], align="center", className="g-0"),
-        dbc.Nav([
-            dbc.NavItem(dbc.NavLink("Home", href="/", className="nav-link")),
-            dbc.NavItem(dbc.NavLink("real-chatbot", href="/real-chatbot", className="nav-link")),
-            dbc.NavItem(dbc.NavLink("banque_reponse", href="/banque_reponse", className="nav-link")),
-            dbc.NavItem(dbc.NavLink("banque_question", href="/banque_question", className="nav-link")),
-            dbc.NavItem(dbc.NavLink("Crypto Market", href="/portfolio", className="nav-link")),
-            dbc.NavItem(dbc.NavLink("Resources", href="/resources", className="nav-link")),
-            dbc.NavItem(dbc.Button("🔒 Login", className="login-button", href="#")),
-        ], navbar=True, className="ms-auto")
-    ], fluid=True),
-    className="navbar",
-    dark=False,  # Désactive le mode sombre de Bootstrap
-    color="transparent"  # Définit la couleur sur transparent
-)
-
+# Navbar dynamique
+def create_navbar():
+    if is_user_logged_in():
+        login_logout_item = dbc.NavItem(dbc.Button("🔓 Logout", className="login-button", id="logout-button"))
+    else:
+        login_logout_item = dbc.NavItem(dbc.Button("🔒 Login", className="login-button", href="/login"))
+    
+    return dbc.Navbar(
+        dbc.Container([
+            dbc.Row([
+                dbc.Col(html.Img(src="/assets/Logo.png", height="100px"), width="auto"),
+            ], align="center", className="g-0"),
+            dbc.Nav([
+                dbc.NavItem(dbc.NavLink("Home", href="/", className="nav-link")),
+                dbc.NavItem(dbc.NavLink("Real Chatbot", href="/real-chatbot", className="nav-link")),
+                dbc.NavItem(dbc.NavLink("Banque Réponse", href="/banque_reponse", className="nav-link")),
+                dbc.NavItem(dbc.NavLink("Banque Question", href="/banque_question", className="nav-link")),
+                dbc.NavItem(dbc.NavLink("Crypto Market", href="/portfolio", className="nav-link")),
+                dbc.NavItem(dbc.NavLink("Resources", href="/resources", className="nav-link")),
+                login_logout_item,
+            ], navbar=True, className="ms-auto")
+        ], fluid=True),
+        className="navbar",
+        dark=False,
+        color="transparent"
+    )
 
 # Mise en page principale
 app.layout = html.Div([
-    navbar,
-    html.Div(dash.page_container, className="content")
+    dcc.Location(id="url", refresh=False),
+    html.Div(id="navbar-container"),
+    html.Div(dash.page_container, className="content"),
+    dcc.Store(id="login-status", storage_type="session")
 ])
+
+# Page d'inscription
+signup_layout = html.Div([
+    html.H2("Inscription", style={
+        "fontSize": "2.8em", "fontWeight": "bold", "textAlign": "center",
+        "marginTop": "60px", "color": "#ffffff", "textShadow": "0 0 8px #00eaff"
+    }),
+    html.Div([
+        dcc.Input(id="signup-email", type="email", placeholder="Email", style={
+            "width": "300px", "padding": "10px", "margin": "10px",
+            "borderRadius": "5px", "border": "1px solid #00eaff", "color": "#ffffff",
+            "background": "transparent"
+        }),
+        dcc.Input(id="signup-password", type="password", placeholder="Mot de passe", style={
+            "width": "300px", "padding": "10px", "margin": "10px",
+            "borderRadius": "5px", "border": "1px solid #00eaff", "color": "#ffffff",
+            "background": "transparent"
+        }),
+        dbc.Button("S'inscrire", id="signup-button", style={
+            "backgroundColor": "#00eaff", "border": "none", "color": "#0a0a0a",
+            "padding": "10px 25px", "fontWeight": "bold", "borderRadius": "8px",
+            "boxShadow": "0 0 10px #00eaff", "margin": "20px"
+        }),
+        html.Div(id="signup-output", style={"color": "#ffffff", "textAlign": "center"}),
+        html.A("Déjà un compte ? Connectez-vous", href="/login", style={"color": "#00eaff"})
+    ], style={"display": "flex", "flexDirection": "column", "alignItems": "center"})
+], style={"minHeight": "100vh", "padding": "30px"})
+
+# Page de connexion
+login_layout = html.Div([
+    html.H2("Connexion", style={
+        "fontSize": "2.8em", "fontWeight": "bold", "textAlign": "center",
+        "marginTop": "60px", "color": "#ffffff", "textShadow": "0 0 8px #00eaff"
+    }),
+    html.Div([
+        dcc.Input(id="login-email", type="email", placeholder="Email", style={
+            "width": "300px", "padding": "10px", "margin": "10px",
+            "borderRadius": "5px", "border": "1px solid #00eaff", "color": "#ffffff",
+            "background": "transparent"
+        }),
+        dcc.Input(id="login-password", type="password", placeholder="Mot de passe", style={
+            "width": "300px", "padding": "10px", "margin": "10px",
+            "borderRadius": "5px", "border": "1px solid #00eaff", "color": "#ffffff",
+            "background": "transparent"
+        }),
+        dbc.Button("Se connecter", id="login-button", style={
+            "backgroundColor": "#00eaff", "border": "none", "color": "#0a0a0a",
+            "padding": "10px 25px", "fontWeight": "bold", "borderRadius": "8px",
+            "boxShadow": "0 0 10px #00eaff", "margin": "20px"
+        }),
+        html.Div(id="login-output", style={"color": "#ffffff", "textAlign": "center"}),
+        html.A("Pas de compte ? Inscrivez-vous", href="/signup", style={"color": "#00eaff"})
+    ], style={"display": "flex", "flexDirection": "column", "alignItems": "center"})
+], style={"minHeight": "100vh", "padding": "30px"})
+
+# Enregistrer les pages
+dash.register_page("login", path="/login", layout=login_layout, name="Login")
+dash.register_page("signup", path="/signup", layout=signup_layout, name="Signup")
+
+# Callbacks
+@app.callback(
+    Output("navbar-container", "children"),
+    Input("url", "pathname"),
+    Input("login-status", "data")
+)
+def update_navbar(pathname, login_status):
+    return create_navbar()
+
+@app.callback(
+    Output("signup-output", "children"),
+    Input("signup-button", "n_clicks"),
+    State("signup-email", "value"),
+    State("signup-password", "value"),
+    prevent_initial_call=True
+)
+def signup(n_clicks, email, password):
+    if not email or not password:
+        return "Veuillez remplir tous les champs."
+    
+    if users_collection.find_one({"email": email}):
+        return "Cet email est déjà utilisé."
+    
+    hashed_password = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+    user_doc = {
+        "email": email,
+        "password": hashed_password,
+        "created_at": datetime.datetime.utcnow()
+    }
+    
+    try:
+        result = users_collection.insert_one(user_doc)
+        session["user_id"] = str(result.inserted_id)
+        return html.Div([dcc.Location(href="/", id="redirect-home")])
+    except Exception as e:
+        return f"Erreur : {str(e)}"
+
+@app.callback(
+    Output("login-output", "children"),
+    Input("login-button", "n_clicks"),
+    State("login-email", "value"),
+    State("login-password", "value"),
+    prevent_initial_call=True
+)
+def login(n_clicks, email, password):
+    if not email or not password:
+        return "Veuillez remplir tous les champs."
+    
+    user = users_collection.find_one({"email": email})
+    if not user:
+        return "Email ou mot de passe incorrect."
+    
+    if bcrypt.checkpw(password.encode("utf-8"), user["password"]):
+        session["user_id"] = str(user["_id"])
+        return html.Div([dcc.Location(href="/", id="redirect-home")])
+    else:
+        return "Email ou mot de passe incorrect."
+
+@app.callback(
+    Output("login-status", "data"),
+    Input("logout-button", "n_clicks"),
+    prevent_initial_call=True
+)
+def logout(n_clicks):
+    if n_clicks:
+        session.pop("user_id", None)
+        return {"redirect": "/login"}
+    return no_update
+
+@app.callback(
+    Output("url", "pathname"),
+    Input("url", "pathname"),
+    prevent_initial_call=True
+)
+def protect_pages(pathname):
+    protected_pages = ["/real-chatbot", "/banque_reponse", "/banque_question", "/portfolio", "/resources"]
+    if pathname in protected_pages and not is_user_logged_in():
+        return "/login"
+    return no_update
 
 if __name__ == "__main__":
     app.run_server(debug=True, port=8050)

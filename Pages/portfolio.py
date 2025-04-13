@@ -5,69 +5,118 @@ import requests
 import pandas as pd
 from dash.dependencies import Input, Output
 import plotly.graph_objs as go
+import time
+import json
+import os
 
 dash.register_page(__name__, path="/portfolio", name="Crypto Market")
 
 # Couleur thème
 theme_color = "#00eaff"
 
-# Fonction pour récupérer les données crypto en temps réel via CoinGecko
-def fetch_crypto_data():
-    try:
-        url = "https://api.coingecko.com/api/v3/coins/markets"
-        params = {
-            "vs_currency": "usd",
-            "order": "market_cap_desc",
-            "per_page": 10,  # Top 10 cryptos
-            "page": 1,
-            "sparkline": True  # Activer la sparkline pour les 7 derniers jours
-        }
-        response = requests.get(url, params=params)
-        response.raise_for_status()  # Lève une exception si la requête échoue
-        data = response.json()
-        
-        if not data:  # Si la réponse est vide
-            print("Aucune donnée reçue de l’API")
-            return pd.DataFrame(columns=["Logo", "Name", "Symbol", "Price", "Market Cap", "24h Volume", "24h Change", "Sparkline"])
-        
-        # Log pour vérifier la réponse brute de l’API
-        print("Réponse brute de l’API (première crypto) :", data[0])
-        print("Sparkline_in_7d (première crypto) :", data[0].get("sparkline_in_7d", "Non présent"))
+# Fonction pour charger le cache des données
+def load_cache():
+    cache_file = "crypto_data_cache.json"
+    if os.path.exists(cache_file):
+        with open(cache_file, "r") as f:
+            cache = json.load(f)
+            # Vérifier si les données sont encore valides (moins de 5 minutes)
+            if "timestamp" in cache and (time.time() - cache["timestamp"]) < 300:
+                return cache["data"]
+    return None
 
-        # Formatter les données pour le tableau
-        df = pd.DataFrame(data, columns=["image", "name", "symbol", "current_price", "market_cap", "total_volume", "price_change_percentage_24h", "sparkline_in_7d"])
-        df["image"] = df["image"]  # URL de l’image
-        df["current_price"] = df["current_price"].apply(lambda x: f"${x:,.2f}" if x else "N/A")
-        df["market_cap"] = df["market_cap"].apply(lambda x: f"${x:,.0f}" if x else "N/A")
-        df["total_volume"] = df["total_volume"].apply(lambda x: f"${x:,.0f}" if x else "N/A")
-        df["price_change_percentage_24h"] = df["price_change_percentage_24h"].apply(lambda x: f"{x:.2f}%" if x else "N/A")
-        # Extraire les données de la sparkline
-        df["sparkline_in_7d"] = df["sparkline_in_7d"].apply(lambda x: x["price"] if isinstance(x, dict) and "price" in x else [])
-        # Log pour vérifier les données de la sparkline après extraction
-        print("Données de sparkline (première ligne) :", df["sparkline_in_7d"].iloc[0][:5] if len(df["sparkline_in_7d"].iloc[0]) > 0 else "Vide")
-        df.columns = ["Logo", "Name", "Symbol", "Price", "Market Cap", "24h Volume", "24h Change", "Sparkline"]
-        return df
-    except Exception as e:
-        print(f"Erreur lors de la récupération des données : {e}")
-        return pd.DataFrame(columns=["Logo", "Name", "Symbol", "Price", "Market Cap", "24h Volume", "24h Change", "Sparkline"])
+# Fonction pour sauvegarder le cache des données
+def save_cache(data):
+    cache = {
+        "timestamp": time.time(),
+        "data": data
+    }
+    with open("crypto_data_cache.json", "w") as f:
+        json.dump(cache, f)
+
+# Fonction pour récupérer les données crypto en temps réel via CoinGecko
+def fetch_crypto_data(retries=3, delay=5):
+    for attempt in range(retries):
+        try:
+            url = "https://api.coingecko.com/api/v3/coins/markets"
+            params = {
+                "vs_currency": "usd",
+                "order": "market_cap_desc",
+                "per_page": 10,  # Top 10 cryptos
+                "page": 1,
+                "sparkline": True,  # Activer la sparkline pour les 7 derniers jours
+                "price_change_percentage": "24h"
+            }
+            response = requests.get(url, params=params)
+            response.raise_for_status()  # Lève une exception si la requête échoue
+            data = response.json()
+            
+            if not data:  # Si la réponse est vide
+                print("Aucune donnée reçue de l’API")
+                return pd.DataFrame(columns=["Logo", "Name", "Symbol", "Price", "Market Cap", "24h Volume", "24h Change", "Sparkline", "Id"])
+            
+            # Log pour vérifier la réponse brute de l’API
+            print("Réponse brute de l’API (premières 5 cryptos) :")
+            for i, coin in enumerate(data[:5]):
+                print(f"Crypto {i+1} : {coin['name']}, sparkline_in_7d : {coin.get('sparkline_in_7d', 'Non présent')}")
+
+            # Formatter les données pour le tableau
+            df = pd.DataFrame(data, columns=["id", "image", "name", "symbol", "current_price", "market_cap", "total_volume", "price_change_percentage_24h", "sparkline_in_7d"])
+            df["image"] = df["image"]  # URL de l’image
+            df["current_price"] = df["current_price"].apply(lambda x: f"${x:,.2f}" if x else "N/A")
+            df["market_cap"] = df["market_cap"].apply(lambda x: f"${x:,.0f}" if x else "N/A")
+            df["total_volume"] = df["total_volume"].apply(lambda x: f"${x:,.0f}" if x else "N/A")
+            df["price_change_percentage_24h"] = df["price_change_percentage_24h"].apply(lambda x: f"{x:.2f}%" if x else "N/A")
+            # Extraire les données de la sparkline
+            df["sparkline_in_7d"] = df["sparkline_in_7d"].apply(lambda x: x["price"] if isinstance(x, dict) and "price" in x else [])
+            # Log pour vérifier les données de la sparkline après extraction
+            for i, row in df.iterrows():
+                print(f"Sparkline pour {row['name']} : {row['sparkline_in_7d'][:5] if row['sparkline_in_7d'] else 'Vide'}")
+            df.columns = ["Id", "Logo", "Name", "Symbol", "Price", "Market Cap", "24h Volume", "24h Change", "Sparkline"]
+            return df
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:  # Too Many Requests
+                print(f"Erreur 429 lors de la récupération des données, tentative {attempt+1}/{retries}. Attente de {delay} secondes...")
+                time.sleep(delay)
+                delay *= 2
+            else:
+                print(f"Erreur lors de la récupération des données : {e}")
+                return pd.DataFrame(columns=["Id", "Logo", "Name", "Symbol", "Price", "Market Cap", "24h Volume", "24h Change", "Sparkline"])
+        except Exception as e:
+            print(f"Erreur lors de la récupération des données : {e}")
+            return pd.DataFrame(columns=["Id", "Logo", "Name", "Symbol", "Price", "Market Cap", "24h Volume", "24h Change", "Sparkline"])
+    print(f"Échec de la récupération des données après {retries} tentatives.")
+    return pd.DataFrame(columns=["Id", "Logo", "Name", "Symbol", "Price", "Market Cap", "24h Volume", "24h Change", "Sparkline"])
 
 # Fonction pour récupérer l’historique des prix sur 7 jours (solution alternative)
-def fetch_sparkline_data(coin_id):
-    try:
-        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
-        params = {
-            "vs_currency": "usd",
-            "days": 7,
-            "interval": "daily"
-        }
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        data = response.json()
-        prices = [price[1] for price in data["prices"]]  # Extraire les prix
-        return prices
-    except Exception as e:
-        print(f"Erreur lors de la récupération de l’historique pour {coin_id} : {e}")
-        return []
+def fetch_sparkline_data(coin_id, retries=3, delay=5):
+    for attempt in range(retries):
+        try:
+            url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+            params = {
+                "vs_currency": "usd",
+                "days": 7,
+                "interval": "daily"
+            }
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            prices = [price[1] for price in data["prices"]]  # Extraire les prix
+            print(f"Données de sparkline récupérées pour {coin_id} : {prices[:5]}...")
+            return prices
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:  # Too Many Requests
+                print(f"Erreur 429 pour {coin_id}, tentative {attempt+1}/{retries}. Attente de {delay} secondes...")
+                time.sleep(delay)
+                delay *= 2
+            else:
+                print(f"Erreur lors de la récupération de l’historique pour {coin_id} : {e}")
+                return []
+        except Exception as e:
+            print(f"Erreur lors de la récupération de l’historique pour {coin_id} : {e}")
+            return []
+    print(f"Échec de la récupération des données pour {coin_id} après {retries} tentatives.")
+    return []
 
 # Fonction pour générer un petit graphique sparkline
 def create_sparkline(prices):
@@ -174,6 +223,20 @@ layout = html.Div([
         "marginBottom": "20px"
     }),
     
+    # Bouton Refresh
+    html.Div([
+        dbc.Button("Refresh", id="refresh-button", n_clicks=0, style={
+            "backgroundColor": theme_color,
+            "border": "none",
+            "color": "#0a0a0a",
+            "padding": "10px 25px",
+            "fontWeight": "bold",
+            "borderRadius": "8px",
+            "boxShadow": f"0 0 10px {theme_color}",
+            "marginBottom": "20px"
+        })
+    ], style={"textAlign": "center"}),
+    
     # Tableau des données
     html.Div(id="crypto-table-container"),
     
@@ -185,20 +248,32 @@ layout = html.Div([
 @dash.callback(
     [Output("crypto-table-container", "children"),
      Output("error-message", "children")],
-    Input("interval-component", "n_intervals")
+    [Input("interval-component", "n_intervals"),
+     Input("refresh-button", "n_clicks")]
 )
-def update_table(n_intervals):
-    df = fetch_crypto_data()
-    if df.empty:
-        return [], "Erreur : Impossible de récupérer les données. Vérifie ta connexion ou réessaie plus tard."
-    data = df.to_dict("records")
+def update_table(n_intervals, n_clicks):
+    # Charger les données du cache
+    cached_data = load_cache()
+    if cached_data is not None and n_clicks == 0:  # Utiliser le cache sauf si le bouton Refresh est cliqué
+        print("Utilisation des données du cache")
+        data = cached_data
+    else:
+        # Récupérer les données principales
+        df = fetch_crypto_data()
+        if df.empty:
+            return [], "Erreur : Impossible de récupérer les données. Vérifie ta connexion ou réessaie plus tard."
+        data = df.to_dict("records")
+        
+        # Si les sparklines sont vides, utiliser l’endpoint alternatif pour chaque crypto
+        for i, row in enumerate(data):
+            if not row["Sparkline"]:
+                coin_id = row["Id"]
+                print(f"Récupération des données de sparkline pour {coin_id} via l’endpoint alternatif")
+                prices = fetch_sparkline_data(coin_id)
+                data[i]["Sparkline"] = prices
+                time.sleep(5)  # Délai de 5 secondes pour éviter l’erreur 429
+        
+        # Sauvegarder les données dans le cache
+        save_cache(data)
     
-    # Si les sparklines sont vides, utiliser l’endpoint alternatif pour chaque crypto
-    for i, row in enumerate(data):
-        if not row["Sparkline"]:
-            coin_id = row["Name"].lower().replace(" ", "-")  # Ex. "Bitcoin" -> "bitcoin"
-            print(f"Récupération des données de sparkline pour {coin_id} via l’endpoint alternatif")
-            prices = fetch_sparkline_data(coin_id)
-            data[i]["Sparkline"] = prices
-    
-    return generate_table(data), ""
+    return generate_table(data), ""     

@@ -11,11 +11,22 @@ import base64
 import io
 import PyPDF2
 import docx
-from model import model, tokenizer  # Importer le modèle et le tokenizer depuis model.py
+from pymongo import MongoClient
+import datetime
+from model import model, tokenizer
 
 dash.register_page(__name__, path="/banque_question", name="Question Bank")
 
 theme_color = "#00eaff"
+
+# Connexion à MongoDB
+try:
+    client = MongoClient("mongodb://localhost:27017/")
+    db = client["due_diligence_db"]
+    collection = db["questions"]
+    print("Connexion à MongoDB réussie.")
+except Exception as e:
+    print(f"Erreur de connexion à MongoDB : {str(e)}")
 
 # Chargement des chunks existants pour la banque de réponses
 try:
@@ -85,7 +96,6 @@ def generate_questions_from_document(context):
     try:
         output = model.generate(**inputs, max_new_tokens=300)
         decoded = tokenizer.decode(output[0], skip_special_tokens=True)
-        # Nettoyer la sortie : prendre uniquement la partie après le dernier "Document:"
         if "Document:" in decoded:
             decoded = decoded.split("Document:")[-1].strip()
         print(f"Questions générées pour le chunk : {decoded}")
@@ -98,7 +108,6 @@ def parse_and_classify_questions(response_text, context):
     question_bank = {"ESG": [], "Compliance": [], "Legal": []}
     current_category = None
 
-    # Nettoyer la sortie : supprimer tout ce qui est avant "ESG:"
     if "ESG:" in response_text:
         response_text = response_text[response_text.index("ESG:"):].strip()
     
@@ -112,14 +121,12 @@ def parse_and_classify_questions(response_text, context):
         elif line.startswith("Legal:"):
             current_category = "Legal"
         elif line.startswith("- [") and current_category:
-            # Extraire la question entre les crochets
             question = re.search(r"\[(.*?)\]", line)
             if question:
                 question_text = question.group(1).strip()
                 if question_text and question_text not in question_bank[current_category]:
                     question_bank[current_category].append(question_text)
         elif line.startswith("- ") and current_category:
-            # Gérer le format sans crochets (ancien format)
             question = line.lstrip("- ").strip()
             if question and question not in question_bank[current_category]:
                 question_bank[current_category].append(question)
@@ -167,8 +174,7 @@ def parse_and_classify_questions(response_text, context):
     print(f"Questions parsées : {question_bank}")
     return question_bank    
 
-# RAG pour générer des réponses
-def retrieve_text(query, top_k=1, use_new_chunks=True):
+def retrieve_text(query, top_k=3, use_new_chunks=True):
     chunks_to_use = new_chunks if use_new_chunks and new_chunks else existing_chunks
     if not index or not chunks_to_use or index.ntotal == 0:
         print("Index FAISS ou chunks non disponibles.")
@@ -194,18 +200,24 @@ def generate_answer_for_question(question, use_new_chunks=True):
         print(f"Aucun contexte trouvé pour la question : {question}")
         return "No relevant context found to answer this question."
     
-    full_query = f"Context: {context}\n\nQuestion: {question}"
+    full_query = (
+        f"Context: {context}\n\n"
+        f"Question: {question}\n\n"
+        "Answer the question based on the provided context. If the context does not contain specific information to answer the question, respond with: 'The document does not provide specific information to answer this question.'"
+    )
     inputs = tokenizer(full_query, return_tensors="pt", truncation=True, max_length=2048).to("cuda" if torch.cuda.is_available() else "cpu")
     try:
-        output = model.generate(**inputs, max_new_tokens=100)
+        output = model.generate(**inputs, max_new_tokens=150)
         decoded = tokenizer.decode(output[0], skip_special_tokens=True)
+        decoded = decoded.strip()
+        if "." in decoded:
+            decoded = decoded[:decoded.rfind(".") + 1]
         print(f"Réponse générée pour la question '{question}' : {decoded}")
         return decoded
     except Exception as e:
         print(f"Erreur lors de la génération de la réponse pour '{question}' : {str(e)}")
         return "Error generating answer."
 
-# Fonction pour générer la banque de questions et réponses
 def generate_question_bank(max_chunks=1):
     print("Début de la génération de la banque de questions...")
     question_bank = {"ESG": [], "Compliance": [], "Legal": []}
@@ -236,6 +248,22 @@ def generate_question_bank(max_chunks=1):
                     unique_entries.append(entry)
             question_bank[category] = unique_entries
         
+        # Sauvegarde dans MongoDB
+        try:
+            for category, entries in question_bank.items():
+                for entry in entries:
+                    question_doc = {
+                        "category": category,
+                        "question": entry["question"],
+                        "answer": entry["answer"],
+                        "created_at": datetime.datetime.utcnow()
+                    }
+                    result = collection.insert_one(question_doc)
+                    print(f"Question sauvegardée dans MongoDB avec ID : {result.inserted_id}")
+        except Exception as e:
+            print(f"Erreur lors de la sauvegarde dans MongoDB : {str(e)}")
+        
+        # Sauvegarde dans un fichier JSON (optionnel)
         with open("question_bank_with_answers.json", "w", encoding="utf-8") as f:
             json.dump(question_bank, f, indent=4, ensure_ascii=False)
         
@@ -247,7 +275,6 @@ def generate_question_bank(max_chunks=1):
         print(f"Erreur lors de la génération de la banque de questions : {str(e)}")
         return {"ESG": [], "Compliance": [], "Legal": []}
 
-# Fonction pour formater l'affichage des questions avec surbrillance
 def format_questions_with_highlights(question_bank):
     print("Formatage des questions pour l'affichage...")
     highlighted = []
@@ -276,7 +303,6 @@ def format_questions_with_highlights(question_bank):
     print(highlighted)
     return highlighted
 
-# Fonction pour vérifier l'exactitude des documents
 def verify_document(context):
     if not context or context.strip() == "":
         print("Le chunk est vide ou invalide pour la vérification.")
@@ -300,7 +326,6 @@ def verify_document(context):
         print(f"Erreur lors de la vérification du document : {str(e)}")
         return "ESG:\nCompliance:\nLegal:\n"
 
-# Fonction pour parser les problèmes identifiés
 def parse_verification_results(response_text):
     verification_results = {"ESG": [], "Compliance": [], "Legal": []}
     current_category = None
@@ -317,7 +342,7 @@ def parse_verification_results(response_text):
             current_category = "Compliance"
         elif line.startswith("Legal:"):
             current_category = "Legal"
-        elif line.startswith("-") and current_category:
+        elif line.startswith("-") and current_category: 
             issue = line.lstrip("- ").strip()
             if issue and issue not in verification_results[current_category]:
                 verification_results[current_category].append(issue)
@@ -331,7 +356,6 @@ def parse_verification_results(response_text):
     print(f"Résultats de vérification parsés : {verification_results}")
     return verification_results
 
-# Fonction pour vérifier tous les documents
 def verify_all_documents(max_chunks=1):
     print("Début de la vérification des documents...")
     verification_results = {"ESG": [], "Compliance": [], "Legal": []}
@@ -363,7 +387,6 @@ def verify_all_documents(max_chunks=1):
         print(f"Erreur lors de la vérification des documents : {str(e)}")
         return {"ESG": [], "Compliance": [], "Legal": []}
 
-# Fonction pour formater l'affichage des résultats de vérification
 def format_verification_with_highlights(verification_results):
     print("Formatage des résultats de vérification pour l'affichage...")
     highlighted = []
@@ -389,7 +412,6 @@ def format_verification_with_highlights(verification_results):
     print(highlighted)
     return highlighted
 
-# Fonction pour extraire le texte des documents
 def extract_text_from_file(filename, contents):
     content_type, content_string = contents.split(',')
     decoded = base64.b64decode(content_string)
@@ -410,7 +432,6 @@ def extract_text_from_file(filename, contents):
         return decoded.decode('utf-8')
     return ""
 
-# Fonction pour découper le texte en chunks
 def chunk_text(text, chunk_size=500):
     words = text.split()
     chunks = []
@@ -442,7 +463,6 @@ layout = html.Div([
             "textShadow": "0 0 8px #00eaff"
         }),
 
-        # Bouton pour uploader des documents
         html.Div([
             dcc.Upload(
                 id="upload-documents",
@@ -462,12 +482,11 @@ layout = html.Div([
                     "color": "#ffffff",
                     "borderColor": theme_color
                 },
-                multiple=True  # Permettre plusieurs fichiers
+                multiple=True
             ),
             html.Div(id="upload-status", style={"color": "#ffffff", "textAlign": "center"})
         ]),
 
-        # Boutons pour générer la banque de questions et vérifier les documents
         html.Div([
             dbc.Button("Generate Question Bank", id="generate-button", n_clicks=0, disabled=True, style={
                 "backgroundColor": theme_color,
@@ -488,11 +507,21 @@ layout = html.Div([
                 "fontWeight": "bold",
                 "borderRadius": "8px",
                 "boxShadow": f"0 0 10px {theme_color}",
+                "marginRight": "20px",
+                "marginBottom": "20px"
+            }),
+            dbc.Button("Reset", id="reset-button", n_clicks=0, style={
+                "backgroundColor": "#ff5555",
+                "border": "none",
+                "color": "#ffffff",
+                "padding": "10px 25px",
+                "fontWeight": "bold",
+                "borderRadius": "8px",
+                "boxShadow": "0 0 10px #ff5555",
                 "marginBottom": "20px"
             }),
         ], style={"textAlign": "center"}),
 
-        # Zone de texte pour afficher les résultats
         html.Div(id="output-box3", style={
             "margin": "20px auto",
             "width": "65%",
@@ -514,8 +543,9 @@ layout = html.Div([
             children=html.Div(id="loading-output3", children="Please wait, generating questions...")
         ),
 
-        # Stockage de l'état de l'upload
-        dcc.Store(id="upload-done", data=False)
+        dcc.Store(id="upload-done", data=False),
+        dcc.Store(id="results-store", storage_type="session", data={"output": [], "loading": ""}),
+        dcc.Store(id="new-chunks-store", storage_type="session", data=[])
     ])
 ], style={
     "minHeight": "100vh",
@@ -533,55 +563,60 @@ layout = html.Div([
     [Output("upload-status", "children"),
      Output("generate-button", "disabled"),
      Output("verify-button", "disabled"),
-     Output("upload-done", "data")],
+     Output("upload-done", "data"),
+     Output("new-chunks-store", "data")],
     Input("upload-documents", "filename"),
     Input("upload-documents", "contents"),
+    State("new-chunks-store", "data"),
     prevent_initial_call=False
 )
-def manage_upload_status(filenames, contents):
+def manage_upload_status(filenames, contents, stored_chunks):
     global new_chunks, index
-    # Cas d'initialisation (au chargement de la page)
     if filenames is None and contents is None:
-        return "Please upload a document to generate questions.", True, True, False
+        return "Please upload a document to generate questions.", True, True, False, stored_chunks
 
-    # Cas où un upload est déclenché
     if not filenames or not contents:
-        return "Please upload a document to generate questions.", True, True, False
+        return "Please upload a document to generate questions.", True, True, False, stored_chunks
     
-    all_chunks = []
+    all_chunks = stored_chunks if stored_chunks else []
     for filename, content in zip(filenames, contents):
         try:
             text = extract_text_from_file(filename, content)
             new_chunks_from_file = chunk_text(text)
             all_chunks.extend(new_chunks_from_file)
         except Exception as e:
-            return f"Error processing {filename}: {str(e)}", True, True, False
+            return f"Error processing {filename}: {str(e)}", True, True, False, stored_chunks
     
-    # Stocker les nouveaux chunks dans new_chunks
     new_chunks = all_chunks
     print(f"Upload réussi : {len(all_chunks)} nouveaux chunks créés.")
     
-    # Recréer l'index FAISS avec les nouveaux chunks
     index = create_faiss_index(new_chunks)
     
-    return f"Successfully uploaded and processed {len(filenames)} document(s). {len(all_chunks)} chunks created.", False, False, True
+    return (f"Successfully uploaded and processed {len(filenames)} document(s). {len(all_chunks)} chunks created.",
+            False, False, True, all_chunks)
 
-# Callback pour gérer les deux actions
+# Callback pour gérer les deux actions (Generate et Verify)
 @dash.callback(
-    Output("output-box3", "children"),
-    Output("loading-output3", "children"),
+    [Output("output-box3", "children"),
+     Output("loading-output3", "children"),
+     Output("results-store", "data")],
     Input("generate-button", "n_clicks"),
     Input("verify-button", "n_clicks"),
-    State("upload-done", "data")
+    State("upload-done", "data"),
+    State("new-chunks-store", "data"),
+    prevent_initial_call=True
 )
-def update_output(generate_clicks, verify_clicks, upload_done):
+def update_output(generate_clicks, verify_clicks, upload_done, stored_chunks):
+    global new_chunks
+    new_chunks = stored_chunks if stored_chunks else []
+
     ctx = dash.callback_context
     if not ctx.triggered:
         print("Aucun bouton n'a été cliqué.")
-        return "", ""
+        return [], "", {"output": [], "loading": ""}
 
     if not upload_done:
-        return html.P("Please upload a document before generating questions or verifying documents.", style={"color": "#ff5555"}), ""
+        return [html.P("Please upload a document before generating questions or verifying documents.", style={"color": "#ff5555"})], "", {"output": [], "loading": ""}
 
     button_id = ctx.triggered[0]["prop_id"].split(".")[0]
     print(f"Bouton cliqué : {button_id}")
@@ -592,10 +627,11 @@ def update_output(generate_clicks, verify_clicks, upload_done):
             formatted_questions = format_questions_with_highlights(question_bank)
             print("Résultat final pour Generate Question Bank :")
             print(formatted_questions)
-            return formatted_questions, ""
+            return formatted_questions, "", {"output": formatted_questions, "loading": ""}
         except Exception as e:
             print(f"Erreur dans le callback Generate Question Bank : {str(e)}")
-            return html.P(f"Error: {str(e)}", style={"color": "#ff5555"}), ""
+            error_output = [html.P(f"Error: {str(e)}", style={"color": "#ff5555"})]
+            return error_output, "", {"output": error_output, "loading": ""}
 
     elif button_id == "verify-button" and verify_clicks > 0:
         try:
@@ -603,10 +639,43 @@ def update_output(generate_clicks, verify_clicks, upload_done):
             formatted_results = format_verification_with_highlights(verification_results)
             print("Résultat final pour Verify Documents :")
             print(formatted_results)
-            return formatted_results, ""
+            return formatted_results, "", {"output": formatted_results, "loading": ""}
         except Exception as e:
             print(f"Erreur dans le callback Verify Documents : {str(e)}")
-            return html.P(f"Error: {str(e)}", style={"color": "#ff5555"}), ""
+            error_output = [html.P(f"Error: {str(e)}", style={"color": "#ff5555"})]
+            return error_output, "", {"output": error_output, "loading": ""}
 
     print("Aucune condition remplie pour le callback.")
-    return "", ""
+    return [], "", {"output": [], "loading": ""}
+
+# Callback pour initialiser les résultats lors du chargement de la page
+@dash.callback(
+    [Output("output-box3", "children", allow_duplicate=True),
+     Output("loading-output3", "children", allow_duplicate=True)],
+    Input("results-store", "data"),
+    prevent_initial_call='initial_duplicate'
+)
+def initialize_results(stored_results):
+    output = stored_results.get("output", []) if stored_results else []
+    loading = stored_results.get("loading", "") if stored_results else ""
+    return output, loading
+
+# Callback pour réinitialiser les données
+@dash.callback(
+    [Output("upload-status", "children", allow_duplicate=True),
+     Output("generate-button", "disabled", allow_duplicate=True),
+     Output("verify-button", "disabled", allow_duplicate=True),
+     Output("upload-done", "data", allow_duplicate=True),
+     Output("new-chunks-store", "data", allow_duplicate=True),
+     Output("results-store", "data", allow_duplicate=True),
+     Output("output-box3", "children", allow_duplicate=True),
+     Output("loading-output3", "children", allow_duplicate=True)],
+    Input("reset-button", "n_clicks"),
+    prevent_initial_call=True
+)
+def reset_data(n_clicks):
+    global new_chunks, index
+    new_chunks = []
+    index = create_faiss_index(new_chunks)
+    return ("Please upload a document to generate questions.", True, True, False,
+            [], {"output": [], "loading": ""}, [], "")
