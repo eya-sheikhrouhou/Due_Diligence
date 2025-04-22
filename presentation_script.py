@@ -88,24 +88,37 @@ def extract_text_from_file(uploaded_file):
     return text
 
 def speak_text(text):
-    engine = pyttsx3.init()
-    engine.setProperty('rate', 165)
-    
-    # Créer un fichier temporaire pour stocker l'audio
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-    temp_path = temp_file.name
-    temp_file.close()
+    try:
+        engine = pyttsx3.init()
+        engine.setProperty('rate', 165)
 
-    engine.save_to_file(text, temp_path)
-    engine.runAndWait()
+        # 🔊 Liste les voix installées (optionnel pour debug)
+        voices = engine.getProperty('voices')
+        print("Voices disponibles:")
+        for v in voices:
+            print(f"- {v.id} ({v.name})")
 
-    # 🔁 Attendre un peu que le fichier soit écrit (important pour certains systèmes)
-    time.sleep(1)
+        # Optionnel : choisir une voix spécifique
+        # engine.setProperty('voice', voices[0].id)
 
-    if os.path.exists(temp_path) and os.path.getsize(temp_path) > 1000:
-        st.audio(temp_path, format='audio/mp3')
-    else:
-        st.error("⚠️ Audio file was not generated correctly.")
+        # Crée un fichier temporaire pour l'audio
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        temp_path = temp_file.name
+        temp_file.close()
+
+        engine.save_to_file(text, temp_path)
+        engine.runAndWait()
+        time.sleep(1)
+
+        if os.path.exists(temp_path) and os.path.getsize(temp_path) > 1000:
+            st.audio(temp_path, format='audio/wav')
+        else:
+            st.error("⚠️ Fichier audio non généré ou vide.")
+            print("⚠️ Audio file path:", temp_path)
+
+    except Exception as e:
+        st.error(f"Erreur synthèse vocale : {e}")
+        print(f"Exception dans speak_text: {e}")
 
 def detect_red_flags(text):
     red_flags = ["ponzi", "scam", "non audited", "data breach", "offshore", "non compliant", "suspicious"]
@@ -114,146 +127,77 @@ def detect_red_flags(text):
 
 # 📤 PowerPoint Générateur
 
-def generate_pptx(session_name, summary_text, key_points=None, logo_path=None):
-    from pptx import Presentation
-    from pptx.util import Inches, Pt
-    from pptx.dml.color import RGBColor
-    from pptx.enum.text import PP_ALIGN
-    from pptx.enum.shapes import MSO_SHAPE
-    from io import BytesIO
-    from datetime import datetime
-    import os
+def generate_pptx(session_name, summary_text, key_points=None, template_path=None):
+    # Charger la présentation depuis le modèle
+    if not template_path or not os.path.exists(template_path):
+        raise FileNotFoundError("Le modèle PowerPoint est introuvable.")
 
-    prs = Presentation()
-    prs.slide_width = Inches(13.333)
-    prs.slide_height = Inches(7.5)
+    prs = Presentation(template_path)
 
-    COLORS = {
-        "dark_blue": RGBColor(18, 32, 47),         # Bleu nuit élégant
-        "medium_blue": RGBColor(44, 98, 176),      # Bleu professionnel doux
-        "light_blue": RGBColor(173, 208, 240),     # Bleu ciel pâle
-        "accent_gold": RGBColor(255, 193, 7),      # Jaune doré vif (accent moderne)
-        "dark_gray": RGBColor(33, 37, 41),         # Gris anthracite (texte)
-        "light_gray": RGBColor(245, 245, 245),     # Gris très clair (fond)
-        "white": RGBColor(255, 255, 255)           # Blanc pur
-    }
+    # Remplacer les espaces réservés du modèle
+    def replace_placeholders(slide):
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            for paragraph in shape.text_frame.paragraphs:
+                for run in paragraph.runs:
+                    run.text = run.text.replace("[Target Company Name]", session_name)
+                    run.text = run.text.replace("[Client Company Name]", "Confidential Client")
+                    run.text = run.text.replace("[Your Name/Firm]", "Due Diligence AI")
+                    run.text = run.text.replace("[Date]", datetime.today().strftime('%B %d, %Y'))
 
-    def add_title_slide():
+    for slide in prs.slides:
+        replace_placeholders(slide)
+
+    # Ajouter une slide de résumé dynamique
+    def add_summary_slide(text):
         slide = prs.slides.add_slide(prs.slide_layouts[6])
-        bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
-        bg.fill.solid()
-        bg.fill.fore_color.rgb = COLORS["dark_blue"]
+        title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(12), Inches(1))
+        title_frame = title_box.text_frame
+        title_frame.text = "Executive Summary"
+        title_frame.paragraphs[0].runs[0].font.size = Pt(32)
+        title_frame.paragraphs[0].runs[0].font.bold = True
 
-        if logo_path and os.path.exists(logo_path):
-            slide.shapes.add_picture(logo_path, Inches(10.5), Inches(0.3), height=Inches(0.8))
-
-        title = slide.shapes.add_textbox(Inches(1), Inches(2), Inches(11), Inches(1.5))
-        tf = title.text_frame
-        p = tf.paragraphs[0]
-        run = p.add_run()
-        run.text = "DUE DILIGENCE SUMMARY"
-        run.font.size = Pt(44)
-        run.font.bold = True
-        run.font.color.rgb = COLORS["white"]
-        p.alignment = PP_ALIGN.LEFT
-
-        subtitle = slide.shapes.add_textbox(Inches(1), Inches(3.2), Inches(11), Inches(1))
-        tf2 = subtitle.text_frame
-        p2 = tf2.paragraphs[0]
-        run2 = p2.add_run()
-        run2.text = "Comprehensive Analysis Report"
-        run2.font.size = Pt(24)
-        run2.font.color.rgb = COLORS["light_blue"]
-
-        info = slide.shapes.add_textbox(Inches(1), Inches(4.2), Inches(11), Inches(1))
-        tf3 = info.text_frame
-        p3 = tf3.paragraphs[0]
-        run3 = p3.add_run()
-        run3.text = f"Session: {session_name}\nDate: {datetime.today().strftime('%B %d, %Y')}"
-        run3.font.size = Pt(18)
-        run3.font.color.rgb = COLORS["white"]
-
-        line = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, Inches(6.5), prs.slide_width, Inches(0.2))
-        line.fill.solid()
-        line.fill.fore_color.rgb = COLORS["accent_gold"]
-
-    def add_summary_slide():
-        def add_slide_with_text(text, title="EXECUTIVE SUMMARY"):
-            slide = prs.slides.add_slide(prs.slide_layouts[6])
-            bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
-            bg.fill.solid()
-            bg.fill.fore_color.rgb = COLORS["light_gray"]
-
-            header = slide.shapes.add_textbox(Inches(0.5), Inches(0.4), Inches(12), Inches(1))
-            tf = header.text_frame
-            p = tf.paragraphs[0]
-            run = p.add_run()
-            run.text = title
-            run.font.size = Pt(32)
-            run.font.bold = True
-            run.font.color.rgb = COLORS["dark_blue"]
-
-            line = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.5), Inches(1.2), Inches(12), Inches(0.05))
-            line.fill.solid()
-            line.fill.fore_color.rgb = COLORS["medium_blue"]
-
-            content = slide.shapes.add_textbox(Inches(0.7), Inches(1.5), Inches(12), Inches(5.5))
-            tf2 = content.text_frame
-            tf2.word_wrap = True
-            tf2.clear()
-
-            p = tf2.add_paragraph()
-            p.text = text.replace("\n", " ")
+        body_box = slide.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(12), Inches(5.5))
+        body_frame = body_box.text_frame
+        body_frame.word_wrap = True
+        for para in text.split("\n"):
+            p = body_frame.add_paragraph()
+            p.text = para.strip()
             p.font.size = Pt(14)
-            p.font.color.rgb = COLORS["dark_gray"]
 
-        chunks = [summary_text[i:i+1200] for i in range(0, len(summary_text), 1200)]
-        for i, chunk in enumerate(chunks[:5]):
-            add_slide_with_text(chunk, title=f"EXECUTIVE SUMMARY ({i+1})" if len(chunks) > 1 else "EXECUTIVE SUMMARY")
+    add_summary_slide(summary_text[:2000])  # Tronqué si trop long
 
+    # Ajouter une slide de recommandations si nécessaire
     def add_recommendations_slide():
         slide = prs.slides.add_slide(prs.slide_layouts[6])
-        bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
-        bg.fill.solid()
-        bg.fill.fore_color.rgb = COLORS["white"]
+        box = slide.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(12), Inches(6))
+        tf = box.text_frame
+        tf.text = "Key Recommendations"
+        tf.paragraphs[0].runs[0].font.size = Pt(32)
+        tf.paragraphs[0].runs[0].font.bold = True
 
-        header = slide.shapes.add_textbox(Inches(0.5), Inches(0.4), Inches(12), Inches(1))
-        tf = header.text_frame
-        p = tf.paragraphs[0]
-        run = p.add_run()
-        run.text = "KEY RECOMMENDATIONS"
-        run.font.size = Pt(32)
-        run.font.bold = True
-        run.font.color.rgb = COLORS["dark_blue"]
-
-        bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.5), Inches(1.2), Inches(1.5), Inches(0.1))
-        bar.fill.solid()
-        bar.fill.fore_color.rgb = COLORS["accent_gold"]
-
-        bullet_box = slide.shapes.add_textbox(Inches(1), Inches(1.7), Inches(11), Inches(4.6))
-        tf2 = bullet_box.text_frame
-        tf2.word_wrap = True
-        bullets = key_points or [
-            "Ensure compliance with KYC/AML & financial regulations",
-            "Reinforce risk policies for digital asset transactions",
-            "Audit document flows and ownership structures",
-            "Improve market volatility protection mechanisms",
-            "Harden cybersecurity systems and access controls"
+        recs = key_points or [
+            "Ensure compliance with KYC/AML regulations.",
+            "Audit all financial statements and ownership structures.",
+            "Enhance cybersecurity measures and data privacy controls.",
+            "Evaluate market volatility exposure and stress test mechanisms."
         ]
-        for bullet in bullets:
-            p = tf2.add_paragraph()
-            p.text = bullet
-            p.font.size = Pt(18)
-            p.font.color.rgb = COLORS["dark_gray"]
 
-    add_title_slide()
-    add_summary_slide()
+        for rec in recs:
+            p = tf.add_paragraph()
+            p.text = f"• {rec}"
+            p.level = 0
+            p.font.size = Pt(18)
+
     add_recommendations_slide()
 
+    # Sauvegarder en mémoire
     pptx_io = BytesIO()
     prs.save(pptx_io)
     pptx_io.seek(0)
     return pptx_io
+
 # 💾 Sauvegarde MongoDB
 def save_conversation(session_name, history):
     collection.update_one(
@@ -344,7 +288,7 @@ if st.sidebar.button("📁 Export Conversation (.csv)"):
 if st.sidebar.button("📊 Export PowerPoint (.pptx)"):
     if st.session_state.chat_context and st.session_state.history:
         raw_doc_text = list(st.session_state.chat_context.values())[0]
-        pptx_file = generate_pptx(st.session_state.session_name, raw_doc_text)
+        pptx_file = generate_pptx(st.session_state.session_name, raw_doc_text,    template_path="/Users/yass/Desktop/Financial-Due-Diligence-Target-Company-Name (1).pptx")
         st.sidebar.download_button(
             label="⬇️ Download PPTX",
             data=pptx_file,
