@@ -1,190 +1,147 @@
-import streamlit as st
+import dash
+from dash import html, dcc, Input, Output, State
+import dash_bootstrap_components as dbc
+import base64
 import os
-from PyPDF2 import PdfReader
-import docx
-from sqlalchemy import create_engine, Column, Integer, String, Text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from datetime import datetime
+from pymongo import MongoClient
+import pandas as pd
 from pptx import Presentation
-import openai
 from io import BytesIO
+import pdfplumber
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+import ollama
 
-# Set OpenAI API Key
-openai.api_key = "YOUR_OPENAI_API_KEY"
+# MongoDB Setup
+client = MongoClient("mongodb://localhost:27017/")
+db = client["due_diligence"]
+collection = db["qa_sessions"]
 
-# Database setup
-DATABASE_URL = "sqlite:///due_diligence.db"
-engine = create_engine(DATABASE_URL, echo=True)
-Base = declarative_base()
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+MODEL_NAME = "mistral:latest"
 
-# Create models
-class Document(Base):
-    __tablename__ = 'documents'
-    id = Column(Integer, primary_key=True, index=True)
-    file_name = Column(String, index=True)
-    content = Column(Text)
+# Dash App Setup
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+app.title = "Due Diligence ChatBot"
 
-class Answer(Base):
-    __tablename__ = 'answers'
-    id = Column(Integer, primary_key=True, index=True)
-    document_id = Column(Integer, index=True)
-    question = Column(String)
-    answer = Column(Text)
-    tag = Column(String)
+navbar = dbc.NavbarSimple(
+    brand="Due Diligence Assistant",
+    brand_href="#",
+    color="dark",
+    dark=True,
+    children=[
+        dbc.NavItem(dbc.NavLink("Home", href="#home")),
+        dbc.NavItem(dbc.NavLink("Chat", href="#chat")),
+        dbc.NavItem(dbc.NavLink("Export", href="#export")),
+    ]
+)
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+app.layout = html.Div([
+    navbar,
+    html.Div(id='home', children=[
+        dbc.Container([
+            html.H2("Welcome to the Due Diligence Assistant", className="my-4"),
+            html.P("Upload a document, ask questions, get insights.")
+        ])
+    ], style={"padding": "2rem"}),
 
-# Helper functions for parsing documents
-def parse_pdf(file):
-    reader = PdfReader(file)
-    text = ""
-    for page in reader.pages:
-        text += page.extract_text()
+    html.Div(id='chat', children=[
+        dbc.Container([
+            dcc.Upload(
+                id='upload-data',
+                children=html.Div(['Drag and Drop or ', html.A('Select a File')]),
+                style={
+                    'width': '100%', 'height': '60px', 'lineHeight': '60px',
+                    'borderWidth': '1px', 'borderStyle': 'dashed',
+                    'borderRadius': '5px', 'textAlign': 'center'
+                },
+                multiple=False
+            ),
+            html.Br(),
+            dcc.Textarea(id='context-area', style={'width': '100%', 'height': 200}),
+            html.Br(),
+            dcc.Input(id='user-question', type='text', placeholder='Ask a question...', style={'width': '80%'}),
+            html.Button('Submit', id='submit-question', n_clicks=0),
+            html.Br(), html.Br(),
+            html.Div(id='answer-area')
+        ])
+    ], style={"padding": "2rem"}),
+
+    html.Div(id='export', children=[
+        dbc.Container([
+            html.H4("Export Your Conversation"),
+            html.Button("Download CSV", id="download-csv-btn"),
+            dcc.Download(id="download-csv")
+        ])
+    ], style={"padding": "2rem"})
+])
+
+# Helper Functions
+
+def extract_text_from_pdf(contents):
+    content_type, content_string = contents.split(',')
+    decoded = base64.b64decode(content_string)
+    with pdfplumber.open(BytesIO(decoded)) as pdf:
+        text = "\n".join([page.extract_text() for page in pdf.pages if page.extract_text()])
     return text
 
-def parse_word(file):
-    doc = docx.Document(file)
-    text = ""
-    for para in doc.paragraphs:
-        text += para.text
-    return text
+def find_relevant_context(question, context_text, max_words=300):
+    vectorizer = TfidfVectorizer(stop_words="english")
+    corpus = [context_text, question]
+    tfidf_matrix = vectorizer.fit_transform(corpus)
+    similarity_scores = (tfidf_matrix[-1] @ tfidf_matrix[:-1].T).toarray()[0]
+    return context_text[:max_words] if similarity_scores[0] > 0 else ""
 
-# Saving document to database
-def save_to_db(file_name, content):
-    db = SessionLocal()
-    db_document = Document(file_name=file_name, content=content)
-    db.add(db_document)
-    db.commit()
-    db.refresh(db_document)
-    return db_document
+def generate_answer_with_ollama(question, context):
+    prompt = f"""
+    You are a due diligence expert. Use the context to answer the question.
 
-# Saving answer to database
-def save_answer_to_db(document_id, question, answer):
-    db = SessionLocal()
-    db_answer = Answer(document_id=document_id, question=question, answer=answer)
-    db.add(db_answer)
-    db.commit()
-    db.refresh(db_answer)
-    return db_answer
+    CONTEXT:
+    {context}
 
-# Generate report (PowerPoint)
-def generate_pptx_report(answers):
-    prs = Presentation()
-    slide_layout = prs.slide_layouts[1]  # Title and Content
-    slide = prs.slides.add_slide(slide_layout)
-    title = slide.shapes.title
-    content = slide.shapes.placeholders[1]
-    
-    title.text = "Due Diligence Q&A Report"
-    
-    # Add Q&A content to slides
-    for answer in answers:
-        content.text += f"Question: {answer.question}\nAnswer: {answer.answer}\n\n"
-    
-    pptx_file = "due_diligence_report.pptx"
-    prs.save(pptx_file)
-    return pptx_file
+    QUESTION:
+    {question}
 
-# Classify answers based on simple keywords
-def classify_answer(answer):
-    # Example: tagging based on keywords
-    if "risk" in answer.lower():
-        return "Risk"
-    elif "growth" in answer.lower():
-        return "Growth"
-    else:
-        return "General"
+    ANSWER:
+    """
+    response = ollama.chat(model=MODEL_NAME, messages=[{"role": "user", "content": prompt}], options={"num_predict": 250})
+    return response['message']['content'].strip()
 
-# Streamlit UI
-st.set_page_config(page_title="Due Diligence Platform", layout="wide")
+# Callbacks
+@app.callback(
+    Output('context-area', 'value'),
+    Input('upload-data', 'contents')
+)
+def update_context_area(contents):
+    if contents:
+        return extract_text_from_pdf(contents)
+    return ''
 
-# Navigation
-page = st.sidebar.selectbox("Select Page", ["Home", "About", "Upload Documents", "Generate Report"])
+@app.callback(
+    Output('answer-area', 'children'),
+    Input('submit-question', 'n_clicks'),
+    State('user-question', 'value'),
+    State('context-area', 'value')
+)
+def handle_question(n_clicks, question, context):
+    if n_clicks and question:
+        relevant_context = find_relevant_context(question, context)
+        answer = generate_answer_with_ollama(question, relevant_context)
+        return html.Div([
+            html.H5("Answer:"),
+            html.P(answer)
+        ])
+    return ''
 
-# Home Page
-if page == "Home":
-    st.markdown("""
-        <div style="padding: 4rem 2rem 2rem; background: linear-gradient(to right, #1a1a1a, #0f0f0f); text-align: center;">
-            <h1 style="color: white; font-size: 3rem;">Smart Insights.<br>For Your Trusted Decisions</h1>
-            <p style="color: #ccc; font-size: 1.2rem;">Streamlined due diligence to empower investors, startups, and enterprises.</p>
-        </div>
-    """, unsafe_allow_html=True)
+@app.callback(
+    Output("download-csv", "data"),
+    Input("download-csv-btn", "n_clicks"),
+    prevent_initial_call=True
+)
+def download_csv(n_clicks):
+    data = list(collection.find({}, {"_id": 0, "session": 1, "messages": 1}))
+    df = pd.DataFrame(data)
+    return dcc.send_data_frame(df.to_csv, filename="qa_history.csv")
 
-# About Page
-elif page == "About":
-    st.subheader("About Our Due Diligence Platform")
-    st.markdown("""
-        Our platform streamlines due diligence by automating document parsing, answering questions, 
-        generating reports, and enabling collaborative interactions with a Human-in-the-Loop feature.
-    """)
-
-# Upload Documents Page
-elif page == "Upload Documents":
-    uploaded_file = st.file_uploader("Upload your documents", type=["pdf", "docx", "txt"])
-    if uploaded_file is not None:
-        # Handle document parsing
-        if uploaded_file.type == "application/pdf":
-            document_text = parse_pdf(uploaded_file)
-        elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-            document_text = parse_word(uploaded_file)
-        else:
-            document_text = uploaded_file.read().decode("utf-8")
-        
-        # Save parsed content to database
-        document_saved = save_to_db(uploaded_file.name, document_text)
-        st.write(f"Document {document_saved.file_name} saved to database!")
-
-        st.write("Parsed Document Content:")
-        st.text_area("Document Content", document_text, height=300)
-
-        # Ask a question
-        question = st.text_input("Enter a question to ask")
-        if question:
-            # Get LLM response (OpenAI example)
-            response = openai.Completion.create(
-                model="text-davinci-003",
-                prompt=f"Answer the following question based on the document: {document_text}\nQuestion: {question}",
-                max_tokens=500
-            )
-            answer = response.choices[0].text.strip()
-
-            # Save answer to database
-            answer_saved = save_answer_to_db(document_saved.id, question, answer)
-            st.write(f"Answer for '{question}' saved!")
-            st.write("Answer:", answer)
-
-# Generate Report Page
-elif page == "Generate Report":
-    db = SessionLocal()
-    answers = db.query(Answer).all()
-
-    if st.button("Generate PowerPoint Report"):
-        pptx_file = generate_pptx_report(answers)
-        st.write("Report Generated: [Download PPTX Report](%s)" % pptx_file)
-
-    # Display all answers
-    for answer in answers:
-        st.write(f"Question: {answer.question}")
-        st.write(f"Answer: {answer.answer}")
-        st.write(f"Tag: {answer.tag}")
-
-    # Tag classification for answers
-    if st.button("Classify Answers"):
-        for answer in answers:
-            answer.tag = classify_answer(answer.answer)
-            db.commit()
-        st.write("Answers classified successfully.")
-
-# Human in the Loop - Chatbot Interaction
-human_input = st.text_input("Improve the answer (Human in the Loop)")
-if human_input:
-    # Process with LLM or a simple chatbot algorithm
-    improved_answer = openai.Completion.create(
-        model="text-davinci-003",
-        prompt=f"Improve the following answer: {human_input}",
-        max_tokens=500
-    ).choices[0].text.strip()
-    
-    st.write("Improved Answer:", improved_answer)
+if __name__ == '__main__':
+    app.run_server(debug=True)

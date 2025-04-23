@@ -1,0 +1,533 @@
+import os
+import streamlit as st
+import ollama
+import glob
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.text import PP_ALIGN
+import re
+
+
+import pdfplumber
+import PyPDF2
+import speech_recognition as sr
+from io import BytesIO
+from pymongo import MongoClient
+from datetime import datetime, timezone
+from sklearn.feature_extraction.text import TfidfVectorizer
+import numpy as np
+import pandas as pd
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+import pyttsx3
+import tempfile
+import pyttsx3
+import tempfile
+import time
+import os
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN
+from pptx.enum.shapes import MSO_SHAPE
+
+# ⛓️ Environnement & DB
+os.environ["OLLAMA_NUM_GPU_LAYERS"] = "100"
+client = MongoClient("mongodb://localhost:27017/")
+db = client["due_diligence"]
+collection = db["qa_sessions"]
+
+MODEL_NAME = "mistral:latest"
+
+# 📜 Préchargement de textes si dispos
+cleaned_texts_dir = "cleaned_texts"
+cleaned_texts = {txt_file: open(txt_file, "r", encoding="utf-8").read() for txt_file in glob.glob(f"{cleaned_texts_dir}/*.txt")}
+
+# 🔍 Recherche de contexte
+def find_relevant_context(question, texts, max_words=300):
+    if not texts: return ""
+    vectorizer = TfidfVectorizer(stop_words="english")
+    corpus = list(texts.values()) + [question]
+    tfidf_matrix = vectorizer.fit_transform(corpus)
+    similarity_scores = (tfidf_matrix[-1] @ tfidf_matrix[:-1].T).toarray()[0]
+    best_match_idx = np.argmax(similarity_scores)
+    return list(texts.values())[best_match_idx][:max_words]
+
+# 🤖 Appel Ollama
+def generate_answer_with_ollama(question, context):
+    if not context.strip():
+        context = "No specific context available. Please answer based on your digital finance expertise."
+    prompt = f"""
+    You are a due diligence expert. Answer the question below using only this context if possible:
+
+    CONTEXT:
+    {context}
+
+    QUESTION:
+    {question}
+
+    INSTRUCTIONS:
+    - Be complete, minimum 4 sentences.
+    - If context is insufficient, answer with industry knowledge and suggest additional details needed.
+
+    ANSWER:
+    """
+    response = ollama.chat(model=MODEL_NAME, messages=[{"role": "user", "content": prompt}], options={"num_predict": 250})
+    return response['message']['content'].strip()
+
+# 📄 Lecture fichier
+def extract_text_from_file(uploaded_file):
+    ext = uploaded_file.name.lower()
+    text = ""
+    if ext.endswith(".txt"):
+        text = uploaded_file.read().decode("utf-8")
+    elif ext.endswith(".pdf"):
+        with pdfplumber.open(uploaded_file) as pdf:
+            for page in pdf.pages:
+                content = page.extract_text()
+                if content:
+                    text += content + "\n"
+    return text
+
+def classify_answer_tags(answer_text):
+    prompt = f"""
+You are an AI tagger. Based on the following answer, assign 1 to 3 relevant tags from this list:
+
+Tags:
+- Financials
+- Legal
+- Compliance
+- Market
+- Strategy
+- Risk
+- Documentation
+- Management
+
+ANSWER:
+{answer_text}
+
+Return the result in this format:
+Tags: [tag1, tag2, ...]
+"""
+    response = ollama.chat(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        options={"num_predict": 100}
+    )
+    raw = response["message"]["content"].strip()
+    
+    # Extraction simple
+    match = re.search(r"\[([^\]]+)\]", raw)
+    if match:
+        return [tag.strip() for tag in match.group(1).split(",")]
+    return []
+
+
+def speak_text(text):
+    engine = pyttsx3.init()
+    engine.setProperty('rate', 165)
+    
+    # Créer un fichier temporaire pour stocker l'audio
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+    temp_path = temp_file.name
+    temp_file.close()
+
+    engine.save_to_file(text, temp_path)
+    engine.runAndWait()
+
+    # 🔁 Attendre un peu que le fichier soit écrit (important pour certains systèmes)
+    time.sleep(1)
+
+    if os.path.exists(temp_path) and os.path.getsize(temp_path) > 1000:
+        st.audio(temp_path, format='audio/mp3')
+    else:
+        st.error("⚠️ Audio file was not generated correctly.")
+
+# 🔎 Red Flags à surveiller
+def detect_red_flags_with_highlight(text):
+    red_flags = [
+        "ponzi", "scam", "non audited", "data breach",
+        "offshore", "non compliant", "no license",
+        "sanction", "money laundering", "anonymous",
+        "rug pull", "fraud", "suspicious"
+    ]
+    
+    # Découper le texte en phrases
+    sentences = re.split(r'(?<=[.?!])\s+', text)
+
+    matched_flags = set()
+    highlighted_sentences = []
+
+    for sentence in sentences:
+        original_sentence = sentence
+        for flag in red_flags:
+            pattern = re.compile(rf'\b({re.escape(flag)})\b', re.IGNORECASE)
+            if pattern.search(sentence):
+                sentence = pattern.sub(r'<mark>\1</mark>', sentence)
+                matched_flags.add(flag.lower())
+        if sentence != original_sentence:
+            highlighted_sentences.append(sentence.strip())
+
+    return sorted(matched_flags), highlighted_sentences
+
+def evaluate_answer_with_ollama(question, answer):
+    prompt = f"""
+You are a senior due diligence reviewer.
+
+Evaluate the following answer to the question based on:
+- Relevance
+- Completeness
+- Usefulness in due diligence
+
+Format your response exactly like this:
+Score: X/10  
+Comment: <Your feedback>
+
+QUESTION:
+{question}
+
+ANSWER:
+{answer}
+"""
+    response = ollama.chat(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        options={"num_predict": 200}
+    )
+    result = response["message"]["content"].strip()
+
+    # Extraction du score et du commentaire
+    score_match = re.search(r"Score:\s*(\d+)/10", result)
+    comment_match = re.search(r"Comment:\s*(.*)", result, re.DOTALL)
+
+    score = int(score_match.group(1)) if score_match else 0
+    comment = comment_match.group(1).strip() if comment_match else "No comment."
+
+    return score, comment
+# 📤 PowerPoint Générateur
+
+def generate_pptx(session_name, summary_text, key_points=None, logo_path=None):
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+    from pptx.dml.color import RGBColor
+    from pptx.enum.text import PP_ALIGN
+    from pptx.enum.shapes import MSO_SHAPE
+    from io import BytesIO
+    from datetime import datetime
+    import os
+
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+
+    COLORS = {
+        "dark_blue": RGBColor(18, 32, 47),         # Bleu nuit élégant
+        "medium_blue": RGBColor(44, 98, 176),      # Bleu professionnel doux
+        "light_blue": RGBColor(173, 208, 240),     # Bleu ciel pâle
+        "accent_gold": RGBColor(255, 193, 7),      # Jaune doré vif (accent moderne)
+        "dark_gray": RGBColor(33, 37, 41),         # Gris anthracite (texte)
+        "light_gray": RGBColor(245, 245, 245),     # Gris très clair (fond)
+        "white": RGBColor(255, 255, 255)           # Blanc pur
+    }
+
+    def add_title_slide():
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+        bg.fill.solid()
+        bg.fill.fore_color.rgb = COLORS["dark_blue"]
+
+        if logo_path and os.path.exists(logo_path):
+            slide.shapes.add_picture(logo_path, Inches(10.5), Inches(0.3), height=Inches(0.8))
+
+        title = slide.shapes.add_textbox(Inches(1), Inches(2), Inches(11), Inches(1.5))
+        tf = title.text_frame
+        p = tf.paragraphs[0]
+        run = p.add_run()
+        run.text = "DUE DILIGENCE SUMMARY"
+        run.font.size = Pt(44)
+        run.font.bold = True
+        run.font.color.rgb = COLORS["white"]
+        p.alignment = PP_ALIGN.LEFT
+
+        subtitle = slide.shapes.add_textbox(Inches(1), Inches(3.2), Inches(11), Inches(1))
+        tf2 = subtitle.text_frame
+        p2 = tf2.paragraphs[0]
+        run2 = p2.add_run()
+        run2.text = "Comprehensive Analysis Report"
+        run2.font.size = Pt(24)
+        run2.font.color.rgb = COLORS["light_blue"]
+
+        info = slide.shapes.add_textbox(Inches(1), Inches(4.2), Inches(11), Inches(1))
+        tf3 = info.text_frame
+        p3 = tf3.paragraphs[0]
+        run3 = p3.add_run()
+        run3.text = f"Session: {session_name}\nDate: {datetime.today().strftime('%B %d, %Y')}"
+        run3.font.size = Pt(18)
+        run3.font.color.rgb = COLORS["white"]
+
+        line = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, Inches(6.5), prs.slide_width, Inches(0.2))
+        line.fill.solid()
+        line.fill.fore_color.rgb = COLORS["accent_gold"]
+
+    def add_summary_slide():
+        def add_slide_with_text(text, title="EXECUTIVE SUMMARY"):
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+            bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+            bg.fill.solid()
+            bg.fill.fore_color.rgb = COLORS["light_gray"]
+
+            header = slide.shapes.add_textbox(Inches(0.5), Inches(0.4), Inches(12), Inches(1))
+            tf = header.text_frame
+            p = tf.paragraphs[0]
+            run = p.add_run()
+            run.text = title
+            run.font.size = Pt(32)
+            run.font.bold = True
+            run.font.color.rgb = COLORS["dark_blue"]
+
+            line = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.5), Inches(1.2), Inches(12), Inches(0.05))
+            line.fill.solid()
+            line.fill.fore_color.rgb = COLORS["medium_blue"]
+
+            content = slide.shapes.add_textbox(Inches(0.7), Inches(1.5), Inches(12), Inches(5.5))
+            tf2 = content.text_frame
+            tf2.word_wrap = True
+            tf2.clear()
+
+            p = tf2.add_paragraph()
+            p.text = text.replace("\n", " ")
+            p.font.size = Pt(14)
+            p.font.color.rgb = COLORS["dark_gray"]
+
+        chunks = [summary_text[i:i+1200] for i in range(0, len(summary_text), 1200)]
+        for i, chunk in enumerate(chunks[:5]):
+            add_slide_with_text(chunk, title=f"EXECUTIVE SUMMARY ({i+1})" if len(chunks) > 1 else "EXECUTIVE SUMMARY")
+
+    def add_recommendations_slide():
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
+        bg.fill.solid()
+        bg.fill.fore_color.rgb = COLORS["white"]
+
+        header = slide.shapes.add_textbox(Inches(0.5), Inches(0.4), Inches(12), Inches(1))
+        tf = header.text_frame
+        p = tf.paragraphs[0]
+        run = p.add_run()
+        run.text = "KEY RECOMMENDATIONS"
+        run.font.size = Pt(32)
+        run.font.bold = True
+        run.font.color.rgb = COLORS["dark_blue"]
+
+        bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.5), Inches(1.2), Inches(1.5), Inches(0.1))
+        bar.fill.solid()
+        bar.fill.fore_color.rgb = COLORS["accent_gold"]
+
+        bullet_box = slide.shapes.add_textbox(Inches(1), Inches(1.7), Inches(11), Inches(4.6))
+        tf2 = bullet_box.text_frame
+        tf2.word_wrap = True
+        bullets = key_points or [
+            "Ensure compliance with KYC/AML & financial regulations",
+            "Reinforce risk policies for digital asset transactions",
+            "Audit document flows and ownership structures",
+            "Improve market volatility protection mechanisms",
+            "Harden cybersecurity systems and access controls"
+        ]
+        for bullet in bullets:
+            p = tf2.add_paragraph()
+            p.text = bullet
+            p.font.size = Pt(18)
+            p.font.color.rgb = COLORS["dark_gray"]
+
+    add_title_slide()
+    add_summary_slide()
+    add_recommendations_slide()
+
+    pptx_io = BytesIO()
+    prs.save(pptx_io)
+    pptx_io.seek(0)
+    return pptx_io
+
+def render_tags(tags):
+    tag_html = ' '.join([f'<span style="background-color:#343541;padding:5px 10px;border-radius:12px;color:white;font-size:12px;margin-right:5px;">{tag}</span>' for tag in tags])
+    st.markdown(tag_html, unsafe_allow_html=True)
+
+# 💾 Sauvegarde MongoDB
+def save_conversation(session_name, history):
+    # S'assurer que chaque message a un champ "tags", même vide
+    for msg in history:
+        if "tags" not in msg:
+            msg["tags"] = []
+
+    collection.update_one(
+        {"session": session_name},
+        {"$set": {"messages": history, "timestamp": datetime.now(timezone.utc)}},
+        upsert=True
+    )
+
+
+# 🎨 Streamlit config
+st.set_page_config("💬 Due Diligence AI", layout="wide")
+st.markdown("<h1 style='text-align: center;'>💼 Due Diligence ChatGPT Assistant</h1>", unsafe_allow_html=True)
+
+# 🧾 Session state init
+if "history" not in st.session_state:
+    st.session_state.history = []
+if "chat_context" not in st.session_state:
+    st.session_state.chat_context = dict(cleaned_texts)
+if "session_name" not in st.session_state:
+    st.session_state.session_name = f"Session-{datetime.utcnow().strftime('%Y%m%d%H%M')}"
+
+# 📎 Upload document
+st.sidebar.title("📎 Document Context")
+uploaded_file = st.sidebar.file_uploader("Upload .pdf or .txt", type=["pdf", "txt"])
+if uploaded_file:
+    doc_text = extract_text_from_file(uploaded_file)
+    st.session_state.chat_context = {uploaded_file.name: doc_text}
+
+    detected_flags, flagged_sentences = detect_red_flags_with_highlight(doc_text)
+
+    if detected_flags:
+        st.sidebar.error(f"⚠️ Red flags detected: {', '.join(detected_flags)}")
+
+        with st.sidebar.expander("🔍 Sentences with red flags", expanded=False):
+            for sentence in flagged_sentences:
+                st.sidebar.markdown(f"• {sentence}", unsafe_allow_html=True)
+    else:
+        st.sidebar.success("✅ Document loaded without detected risks.")
+
+
+
+# 🆕 New Chat
+if st.sidebar.button("➕ New Chat"):
+    st.session_state.update({
+        "history": [],
+        "chat_context": dict(cleaned_texts),
+        "session_name": f"Session-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M')}"
+    })
+    st.rerun()
+
+# 💬 Historique sessions
+chat_sessions = list(collection.find({}, {"session": 1, "timestamp": 1}).sort("timestamp", -1).limit(10))
+session_names = [s["session"] for s in chat_sessions]
+
+selected_session = st.sidebar.selectbox("📚 Load a past chat", session_names)
+if selected_session and selected_session != st.session_state.session_name:
+    doc = collection.find_one({"session": selected_session})
+    if doc:
+        st.session_state.session_name = selected_session
+        st.session_state.history = doc["messages"]
+        st.rerun()
+
+# 💬 Chat
+question = st.chat_input("Ask a due diligence question...")
+if question:
+    with st.chat_message("user"):
+        st.markdown(question)
+    st.session_state.history.append({"role": "user", "content": question})
+
+    with st.spinner("⏳ Thinking..."):
+        context = find_relevant_context(question, st.session_state.chat_context)
+        answer = generate_answer_with_ollama(question, context)
+        tags = classify_answer_tags(answer)
+        st.session_state.history[-1]["tags"] = tags  # Ajout dans l'historique
+
+        if tags:
+            st.markdown(f"🏷️ **Tags:** {' '.join([f'`{t}`' for t in tags])}")
+
+
+    st.session_state.history.append({"role": "assistant", "content": answer})
+    save_conversation(st.session_state.session_name, st.session_state.history)
+
+def improve_answer_with_ollama(question, old_answer, context):
+    prompt = f"""
+You are an expert in Due Diligence.
+
+The user asked:
+{question}
+
+An AI assistant gave the following answer:
+"{old_answer}"
+
+The answer is OK but incomplete. Based on the question and the following CONTEXT, improve and rewrite the answer:
+- Add any missing important points.
+- Be clearer and more actionable.
+- Use complete, professional English.
+
+CONTEXT:
+{context}
+
+Now give the improved answer:
+"""
+    response = ollama.chat(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        options={"num_predict": 250}
+    )
+    return response['message']['content'].strip()
+
+
+# 💬 Affichage messages + Lecture audio
+for i, msg in enumerate(st.session_state.history):
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if msg.get("tags"):
+            render_tags(msg["tags"])
+
+
+        # ✅ Affiche bouton "Speak" uniquement pour les messages de l'assistant
+        if msg["role"] == "assistant":
+            # 🔊 Lecture vocale (déjà existant)
+            if st.button(f"🔊 Speak {i}", key=f"speak_{i}"):
+                speak_text(msg["content"])
+
+                    # 🧠 Evaluation LLM as Judge
+            if st.button(f"📈 Evaluate & Improve {i}", key=f"judge_{i}"):
+                user_question = ""
+                for j in range(i-1, -1, -1):
+                    if st.session_state.history[j]["role"] == "user":
+                        user_question = st.session_state.history[j]["content"]
+                        break
+                
+                score, comment = evaluate_answer_with_ollama(user_question, msg["content"])
+                st.info(f"🧠 LLM Evaluation:\n\nScore: {score}/10\nComment: {comment}")
+
+                if score < 7:
+                    st.warning("⚠️ The answer can be improved. Generating a refined version...")
+
+                    context = find_relevant_context(user_question, st.session_state.chat_context)
+                    improved_answer = improve_answer_with_ollama(user_question, msg["content"], context)
+
+                    st.markdown("🔁 **Improved Answer:**")
+                    st.markdown(improved_answer)
+
+                    # Ajouter à l'historique
+                    st.session_state.history.append({"role": "assistant", "content": improved_answer})
+                    save_conversation(st.session_state.session_name, st.session_state.history)
+
+# 📌 Récupérer tous les tags utilisés
+all_tags = sorted(set(tag for msg in st.session_state.history for tag in msg.get("tags", [])))
+
+st.sidebar.title("🗂️ Filter by Tag")
+selected_tag = st.sidebar.selectbox("Select a tag to filter answers", ["All"] + all_tags)
+
+
+# 📤 Export
+st.sidebar.title("📤 Export")
+
+if st.sidebar.button("📁 Export Conversation (.csv)"):
+    df = pd.DataFrame(st.session_state.history)
+    df.to_csv("conversation.csv", index=False)
+    st.sidebar.download_button("⬇️ Download CSV", data=open("conversation.csv", "rb"), file_name="conversation.csv")
+
+if st.sidebar.button("📊 Export PowerPoint (.pptx)"):
+    if st.session_state.chat_context and st.session_state.history:
+        raw_doc_text = list(st.session_state.chat_context.values())[0]
+        pptx_file = generate_pptx(st.session_state.session_name, raw_doc_text)
+        st.sidebar.download_button(
+            label="⬇️ Download PPTX",
+            data=pptx_file,
+            file_name=f"{st.session_state.session_name}_report.pptx",
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        )
+    else:
+        st.sidebar.warning("❗ Please upload a document and ask at least one question before exporting.")
