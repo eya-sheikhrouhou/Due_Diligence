@@ -6,7 +6,7 @@ import bcrypt
 from pymongo import MongoClient
 import datetime
 
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG], use_pages=True)
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG], use_pages=True, suppress_callback_exceptions=True)
 app.title = "Crypto Due Diligence"
 
 # Connexion à MongoDB
@@ -172,7 +172,7 @@ app.index_string = '''
 def is_user_logged_in():
     return "user_id" in session
 
-# Navbar dynamique
+# Dans app.py, modifier la fonction create_navbar
 def create_navbar():
     if is_user_logged_in():
         login_logout_item = dbc.NavItem(dbc.Button("🔓 Logout", className="login-button", id="logout-button"))
@@ -190,6 +190,7 @@ def create_navbar():
                 dbc.NavItem(dbc.NavLink("Banque Réponse", href="/banque_reponse", className="nav-link")),
                 dbc.NavItem(dbc.NavLink("Banque Question", href="/banque_question", className="nav-link")),
                 dbc.NavItem(dbc.NavLink("Crypto Market", href="/portfolio", className="nav-link")),
+                dbc.NavItem(dbc.NavLink("Crypto Social Media", href="/social_media", className="nav-link")),  # Nouvelle page
                 dbc.NavItem(dbc.NavLink("Resources", href="/resources", className="nav-link")),
                 login_logout_item,
             ], navbar=True, className="ms-auto")
@@ -198,6 +199,7 @@ def create_navbar():
         dark=False,
         color="transparent"
     )
+    
 
 # Mise en page principale
 app.layout = html.Div([

@@ -1,0 +1,15 @@
+.btn-mode {
+    background-color: #00eaff !important;
+    color: #0a0a0a !important;
+    font-weight: bold;
+    border-radius: 8px;
+    margin-right: 10px;
+    box-shadow: 0 0 10px #00eaff;
+}
+.btn-inactive {
+    background-color: #cccccc !important;
+    color: #0a0a0a !important;
+    font-weight: bold;
+    border-radius: 8px;
+    box-shadow: 0 0 10px #cccccc;
+}

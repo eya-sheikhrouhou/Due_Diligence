@@ -37,6 +37,7 @@ def generate_cohere_response(query, chat_history=None):
     except Exception as e:
         return f"Erreur : {str(e)}"
 
+
 # Bubble style generator
 def message_bubble(message, sender="user"):
     align = "flex-end" if sender == "user" else "flex-start"

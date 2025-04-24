@@ -16,7 +16,7 @@ import datetime
 from model import model, tokenizer
 
 dash.register_page(__name__, path="/banque_question", name="Question Bank")
-
+    
 theme_color = "#00eaff"
 
 # Connexion à MongoDB
