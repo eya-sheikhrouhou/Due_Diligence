@@ -6,6 +6,7 @@ import io
 from pathlib import Path
 import datetime
 import logging
+import torch
 from utils.misc_utils import sanitize_input, hex_to_rgb
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,7 @@ def process_webcam_image(camera_image, max_file_size_mb):
 
 def process_ip_camera(url, max_retries, ip_timeout):
     """Capture and process image from IP camera."""
+    import time
     for attempt in range(max_retries):
         try:
             cap = cv2.VideoCapture(url)
@@ -124,3 +126,33 @@ def process_ip_camera(url, max_retries, ip_timeout):
         time.sleep(1)
     else:
         st.error("❌ Max retries reached. Check camera URL or network.")
+
+def extract_reference_embedding(pil_image):
+    """Extract facial embedding from a reference image."""
+    if "mtcnn_detector" not in st.session_state or st.session_state.mtcnn_detector is None:
+        st.error("❌ MTCNN detector not initialized.")
+        logger.error("MTCNN detector not initialized.")
+        return None
+    if "resnet" not in st.session_state or st.session_state.resnet is None:
+        st.error("❌ InceptionResnetV1 not initialized.")
+        logger.error("InceptionResnetV1 not initialized.")
+        return None
+    try:
+        img_rgb = np.array(pil_image.convert("RGB"))
+        logger.debug(f"Reference image shape: {img_rgb.shape}")
+        faces_cropped = st.session_state.mtcnn_detector(img_rgb, save_path=None)
+        if faces_cropped is None or len(faces_cropped) == 0:
+            logger.warning("No faces detected in reference image.")
+            return None
+        face_tensor = faces_cropped[0].unsqueeze(0)  # Add batch dimension
+        logger.debug(f"Face tensor shape: {face_tensor.shape}")
+        if torch.cuda.is_available():
+            face_tensor = face_tensor.cuda()
+        with torch.no_grad():
+            embedding = st.session_state.resnet(face_tensor).cpu().numpy().flatten()
+        logger.info(f"Reference embedding computed: shape={embedding.shape}, norm={np.linalg.norm(embedding):.2f}")
+        return embedding
+    except Exception as e:
+        st.error(f"❌ Error extracting embedding: {e}")
+        logger.error(f"Embedding Extraction Error: {e}")
+        return None

@@ -2,7 +2,7 @@ import streamlit as st
 from streamlit_webrtc import webrtc_streamer, RTCConfiguration, WebRtcMode
 from config.settings import initialize_session_state, setup_page_config, get_gpu_status
 from utils.misc_utils import is_valid_url
-from utils.image_utils import save_image, process_uploaded_images, process_webcam_image, process_ip_camera
+from utils.image_utils import save_image, process_uploaded_images, process_webcam_image, process_ip_camera, extract_reference_embedding
 from processors.face_processor import FaceDetectionProcessor
 from processors.video_processor import VideoFileProcessor
 from detectors.dlib_detector import load_dlib_models
@@ -15,6 +15,10 @@ import io
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+class SuppressScriptRunContextFilter(logging.Filter):
+    def filter(self, record):
+        return "missing ScriptRunContext" not in record.getMessage()
+logger.addFilter(SuppressScriptRunContextFilter())
 
 # --- Initialize Session State ---
 initialize_session_state()
@@ -42,6 +46,7 @@ landmark_color = st.sidebar.color_picker("Landmark Color:", "#FF0000")  # Defaul
 ip_timeout = st.sidebar.slider("IP Camera Timeout (seconds):", 1, 10, 5, 1)
 max_retries = st.sidebar.slider("IP Camera Retry Attempts:", 1, 5, 3, 1)
 playback_speed = st.sidebar.slider("Video Playback Speed:", 0.5, 2.0, 1.0, 0.1)
+similarity_threshold = st.sidebar.slider("Face Recognition Similarity Threshold:", 0.0, 1.0, 0.8, 0.01) if model_choice == "MTCNN" else 0.8
 max_file_size_mb = 5  # Limit uploaded file size
 
 # --- Display Total Face Count in Sidebar ---
@@ -56,24 +61,79 @@ filename_prefix = st.text_input("📄 Filename Prefix:", value="captured")
 # --- Input Method ---
 input_method = st.radio(
     "Input Method:",
-    ["Use IP Camera", "Use Local Webcam", "Upload Images", "Upload Video", "Real-Time Detection (Webcam)"],
+    ["Use IP Camera", "Use Local Webcam", "Upload Images", "Upload Video", "Real-Time Detection (Webcam)", "Face Recognition"],
     key="input_method_radio"
 )
 
+# --- WebRTC Configuration ---
+RTC_CONFIG = RTCConfiguration({
+    "iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun2.l.google.com:19302"]}
+    ]
+})
+
+# --- Face Recognition ---
+if input_method == "Face Recognition":
+    if model_choice != "MTCNN":
+        st.warning("⚠️ Face Recognition requires MTCNN. Please select MTCNN as the model.")
+    else:
+        st.info("ℹ️ Upload a reference image and ensure browser webcam access is enabled.")
+        reference_image = st.file_uploader("Upload Reference Image", type=["jpg", "jpeg", "png"], accept_multiple_files=False)
+        if reference_image:
+            try:
+                # Clear previous reference embedding
+                if "reference_embedding" in st.session_state:
+                    del st.session_state.reference_embedding
+                pil_image = Image.open(reference_image).convert("RGB")
+                st.image(pil_image, caption="Reference Image", use_container_width=True)
+                embedding = extract_reference_embedding(pil_image)
+                if embedding is not None:
+                    st.session_state.reference_embedding = embedding
+                    st.success("✅ Reference image processed successfully.")
+                    # Placeholder for debug info
+                    debug_placeholder = st.empty() if debug_mode else None
+                    logger.info("Starting webrtc_streamer for face recognition")
+                    stream = webrtc_streamer(
+                        key="face-recognition",
+                        mode=WebRtcMode.SENDRECV,
+                        video_processor_factory=lambda: FaceDetectionProcessor(
+                            model_choice, dlib_model_type, dlib_upsample, confidence_threshold,
+                            show_landmarks, box_color, landmark_color, recognition_mode=True,
+                            similarity_threshold=similarity_threshold, debug_placeholder=debug_placeholder
+                        ),
+                        rtc_configuration=RTC_CONFIG,
+                        media_stream_constraints={"video": {"width": {"ideal": 1280}, "height": {"ideal": 720}}, "audio": False},
+                        async_processing=True
+                    )
+                    if stream.state.playing is False:
+                        st.warning("⚠️ Webcam stream failed to start. Check browser permissions or try a different browser.")
+                    if debug_mode:
+                        st.write("Debug Info: Check terminal logs for embedding and similarity details.")
+                else:
+                    st.error("❌ No face detected in the reference image.")
+            except Exception as e:
+                st.error(f"❌ Error processing reference image: {e}")
+                logger.error(f"Reference Image Error: {e}")
+
 # --- Real-Time Detection (Webcam) ---
-if input_method == "Real-Time Detection (Webcam)":
+elif input_method == "Real-Time Detection (Webcam)":
     st.info("ℹ️ Ensure browser webcam access is enabled.")
-    webrtc_streamer(
+    logger.info("Starting webrtc_streamer for real-time detection")
+    stream = webrtc_streamer(
         key="face-detection",
         mode=WebRtcMode.SENDRECV,
         video_processor_factory=lambda: FaceDetectionProcessor(
             model_choice, dlib_model_type, dlib_upsample, confidence_threshold,
-            show_landmarks, box_color, landmark_color
+            show_landmarks, box_color, landmark_color, recognition_mode=False
         ),
-        rtc_configuration=RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}),
-        media_stream_constraints={"video": True, "audio": False},
+        rtc_configuration=RTC_CONFIG,
+        media_stream_constraints={"video": {"width": {"ideal": 1280}, "height": {"ideal": 720}}, "audio": False},
         async_processing=True
     )
+    if stream.state.playing is False:
+        st.warning("⚠️ Webcam stream failed to start. Check browser permissions or try a different browser.")
 
 # --- IP Camera ---
 elif input_method == "Use IP Camera":
@@ -130,7 +190,7 @@ elif input_method == "Upload Video":
                 os.remove(temp_video_path)
 
 # --- Display and Process Images ---
-if st.session_state.captured_images and input_method != "Real-Time Detection (Webcam)":
+if st.session_state.captured_images and input_method not in ["Real-Time Detection (Webcam)", "Face Recognition"]:
     for idx, (pil_image, source) in enumerate(st.session_state.captured_images):
         st.image(pil_image, caption=f"Captured Image {idx + 1} ({source})", use_container_width=True)
         if st.button(f"💾 Save Image {idx + 1}", key=f"save_{idx}"):

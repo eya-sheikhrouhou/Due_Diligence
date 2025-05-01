@@ -1,6 +1,6 @@
 import streamlit as st
 import torch
-from facenet_pytorch import MTCNN
+from facenet_pytorch import MTCNN, InceptionResnetV1
 import logging
 import os
 
@@ -22,18 +22,28 @@ def initialize_session_state():
             gpu_available, device = get_gpu_status()
             st.session_state.mtcnn_detector = MTCNN(
                 keep_all=True, device=device, min_face_size=20,
-                thresholds=[0.6, 0.7, 0.7]
+                thresholds=[0.6, 0.7, 0.7], factor=0.709
             )
             logger.info("MTCNN detector initialized successfully.")
         except Exception as e:
             st.error(f"❌ Failed to initialize MTCNN detector: {e}")
             st.session_state.mtcnn_detector = None
+    if "resnet" not in st.session_state:
+        try:
+            gpu_available, device = get_gpu_status()
+            st.session_state.resnet = InceptionResnetV1(pretrained='vggface2').eval().to(device)
+            logger.info("InceptionResnetV1 initialized successfully.")
+        except Exception as e:
+            st.error(f"❌ Failed to initialize InceptionResnetV1: {e}")
+            st.session_state.resnet = None
     if "dlib_detector" not in st.session_state:
         st.session_state.dlib_detector = None
     if "dlib_predictor" not in st.session_state:
         st.session_state.dlib_predictor = None
     if "video_processing" not in st.session_state:
         st.session_state.video_processing = False
+    if "reference_embedding" not in st.session_state:
+        st.session_state.reference_embedding = None
 
 def setup_page_config():
     """Set up Streamlit page configuration."""
