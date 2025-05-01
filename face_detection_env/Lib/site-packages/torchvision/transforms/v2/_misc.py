@@ -1,5 +1,5 @@
 import warnings
-from typing import Any, Callable, Dict, List, Optional, Sequence, Type, Union
+from typing import Any, Callable, cast, Dict, List, Optional, Sequence, Type, Union
 
 import PIL.Image
 
@@ -14,7 +14,7 @@ from ._utils import _parse_labels_getter, _setup_number_or_seq, _setup_size, get
 
 # TODO: do we want/need to expose this?
 class Identity(Transform):
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
         return inpt
 
 
@@ -34,7 +34,7 @@ class Lambda(Transform):
         self.lambd = lambd
         self.types = types or self._transformed_types
 
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
         if isinstance(inpt, self.types):
             return self.lambd(inpt)
         else:
@@ -99,11 +99,11 @@ class LinearTransformation(Transform):
         self.transformation_matrix = transformation_matrix
         self.mean_vector = mean_vector
 
-    def check_inputs(self, sample: Any) -> Any:
+    def _check_inputs(self, sample: Any) -> Any:
         if has_any(sample, PIL.Image.Image):
             raise TypeError(f"{type(self).__name__}() does not support PIL images.")
 
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
         shape = inpt.shape
         n = shape[-3] * shape[-2] * shape[-1]
         if n != self.transformation_matrix.shape[0]:
@@ -157,18 +157,16 @@ class Normalize(Transform):
         self.std = list(std)
         self.inplace = inplace
 
-    def check_inputs(self, sample: Any) -> Any:
+    def _check_inputs(self, sample: Any) -> Any:
         if has_any(sample, PIL.Image.Image):
             raise TypeError(f"{type(self).__name__}() does not support PIL images.")
 
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
         return self._call_kernel(F.normalize, inpt, mean=self.mean, std=self.std, inplace=self.inplace)
 
 
 class GaussianBlur(Transform):
-    """Blurs image with randomly chosen Gaussian blur kernel.
-
-    The convolution will be using reflection padding corresponding to the kernel size, to maintain the input shape.
+    """Blurs image with randomly chosen Gaussian blur.
 
     If the input is a Tensor, it is expected
     to have [..., C, H, W] shape, where ... means an arbitrary number of leading dimensions.
@@ -197,39 +195,12 @@ class GaussianBlur(Transform):
         if not 0.0 < self.sigma[0] <= self.sigma[1]:
             raise ValueError(f"sigma values should be positive and of the form (min, max). Got {self.sigma}")
 
-    def make_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
+    def _get_params(self, flat_inputs: List[Any]) -> Dict[str, Any]:
         sigma = torch.empty(1).uniform_(self.sigma[0], self.sigma[1]).item()
         return dict(sigma=[sigma, sigma])
 
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
         return self._call_kernel(F.gaussian_blur, inpt, self.kernel_size, **params)
-
-
-class GaussianNoise(Transform):
-    """Add gaussian noise to images or videos.
-
-    The input tensor is expected to be in [..., 1 or 3, H, W] format,
-    where ... means it can have an arbitrary number of leading dimensions.
-    Each image or frame in a batch will be transformed independently i.e. the
-    noise added to each image will be different.
-
-    The input tensor is also expected to be of float dtype in ``[0, 1]``.
-    This transform does not support PIL images.
-
-    Args:
-        mean (float): Mean of the sampled normal distribution. Default is 0.
-        sigma (float): Standard deviation of the sampled normal distribution. Default is 0.1.
-        clip (bool, optional): Whether to clip the values in ``[0, 1]`` after adding noise. Default is True.
-    """
-
-    def __init__(self, mean: float = 0.0, sigma: float = 0.1, clip=True) -> None:
-        super().__init__()
-        self.mean = mean
-        self.sigma = sigma
-        self.clip = clip
-
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        return self._call_kernel(F.gaussian_noise, inpt, mean=self.mean, sigma=self.sigma, clip=self.clip)
 
 
 class ToDtype(Transform):
@@ -272,7 +243,7 @@ class ToDtype(Transform):
         self.dtype = dtype
         self.scale = scale
 
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
         if isinstance(self.dtype, torch.dtype):
             # For consistency / BC with ConvertImageDtype, we only care about images or videos when dtype
             # is a simple torch.dtype
@@ -335,7 +306,7 @@ class ConvertImageDtype(Transform):
         super().__init__()
         self.dtype = dtype
 
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
         return self._call_kernel(F.to_dtype, inpt, dtype=self.dtype, scale=True)
 
 
@@ -344,12 +315,9 @@ class SanitizeBoundingBoxes(Transform):
 
     This transform removes bounding boxes and their associated labels/masks that:
 
-    - are below a given ``min_size`` or ``min_area``: by default this also removes degenerate boxes that have e.g. X2 <= X1.
+    - are below a given ``min_size``: by default this also removes degenerate boxes that have e.g. X2 <= X1.
     - have any coordinate outside of their corresponding image. You may want to
       call :class:`~torchvision.transforms.v2.ClampBoundingBoxes` first to avoid undesired removals.
-
-    It can also sanitize other tensors like the "iscrowd" or "area" properties from COCO
-    (see ``labels_getter`` parameter).
 
     It is recommended to call it at the end of a pipeline, before passing the
     input to the models. It is critical to call this transform if
@@ -359,39 +327,25 @@ class SanitizeBoundingBoxes(Transform):
     cases.
 
     Args:
-        min_size (float, optional): The size below which bounding boxes are removed. Default is 1.
-        min_area (float, optional): The area below which bounding boxes are removed. Default is 1.
-        labels_getter (callable or str or None, optional): indicates how to identify the labels in the input
-            (or anything else that needs to be sanitized along with the bounding boxes).
+        min_size (float, optional) The size below which bounding boxes are removed. Default is 1.
+        labels_getter (callable or str or None, optional): indicates how to identify the labels in the input.
             By default, this will try to find a "labels" key in the input (case-insensitive), if
             the input is a dict or it is a tuple whose second element is a dict.
             This heuristic should work well with a lot of datasets, including the built-in torchvision datasets.
-
-            It can also be a callable that takes the same input as the transform, and returns either:
-
-            - A single tensor (the labels)
-            - A tuple/list of tensors, each of which will be subject to the same sanitization as the bounding boxes.
-              This is useful to sanitize multiple tensors like the labels, and the "iscrowd" or "area" properties
-              from COCO.
-
-            If ``labels_getter`` is None then only bounding boxes are sanitized.
+            It can also be a callable that takes the same input
+            as the transform, and returns the labels.
     """
 
     def __init__(
         self,
         min_size: float = 1.0,
-        min_area: float = 1.0,
-        labels_getter: Union[Callable[[Any], Any], str, None] = "default",
+        labels_getter: Union[Callable[[Any], Optional[torch.Tensor]], str, None] = "default",
     ) -> None:
         super().__init__()
 
         if min_size < 1:
             raise ValueError(f"min_size must be >= 1, got {min_size}.")
         self.min_size = min_size
-
-        if min_area < 1:
-            raise ValueError(f"min_area must be >= 1, got {min_area}.")
-        self.min_area = min_area
 
         self.labels_getter = labels_getter
         self._labels_getter = _parse_labels_getter(labels_getter)
@@ -400,44 +354,46 @@ class SanitizeBoundingBoxes(Transform):
         inputs = inputs if len(inputs) > 1 else inputs[0]
 
         labels = self._labels_getter(inputs)
-        if labels is not None:
-            msg = "The labels in the input to forward() must be a tensor or None, got {type} instead."
-            if isinstance(labels, torch.Tensor):
-                labels = (labels,)
-            elif isinstance(labels, (tuple, list)):
-                for entry in labels:
-                    if not isinstance(entry, torch.Tensor):
-                        # TODO: we don't need to enforce tensors, just that entries are indexable as t[bool_mask]
-                        raise ValueError(msg.format(type=type(entry)))
-            else:
-                raise ValueError(msg.format(type=type(labels)))
+        if labels is not None and not isinstance(labels, torch.Tensor):
+            raise ValueError(
+                f"The labels in the input to forward() must be a tensor or None, got {type(labels)} instead."
+            )
 
         flat_inputs, spec = tree_flatten(inputs)
         boxes = get_bounding_boxes(flat_inputs)
 
-        if labels is not None:
-            for label in labels:
-                if boxes.shape[0] != label.shape[0]:
-                    raise ValueError(
-                        f"Number of boxes (shape={boxes.shape}) and must match the number of labels."
-                        f"Found labels with shape={label.shape})."
-                    )
+        if labels is not None and boxes.shape[0] != labels.shape[0]:
+            raise ValueError(
+                f"Number of boxes (shape={boxes.shape}) and number of labels (shape={labels.shape}) do not match."
+            )
 
-        valid = F._misc._get_sanitize_bounding_boxes_mask(
-            boxes,
-            format=boxes.format,
-            canvas_size=boxes.canvas_size,
-            min_size=self.min_size,
-            min_area=self.min_area,
+        boxes = cast(
+            tv_tensors.BoundingBoxes,
+            F.convert_bounding_box_format(
+                boxes,
+                new_format=tv_tensors.BoundingBoxFormat.XYXY,
+            ),
         )
+        ws, hs = boxes[:, 2] - boxes[:, 0], boxes[:, 3] - boxes[:, 1]
+        valid = (ws >= self.min_size) & (hs >= self.min_size) & (boxes >= 0).all(dim=-1)
+        # TODO: Do we really need to check for out of bounds here? All
+        # transforms should be clamping anyway, so this should never happen?
+        image_h, image_w = boxes.canvas_size
+        valid &= (boxes[:, 0] <= image_w) & (boxes[:, 2] <= image_w)
+        valid &= (boxes[:, 1] <= image_h) & (boxes[:, 3] <= image_h)
 
-        params = dict(valid=valid, labels=labels)
-        flat_outputs = [self.transform(inpt, params) for inpt in flat_inputs]
+        params = dict(valid=valid.as_subclass(torch.Tensor), labels=labels)
+        flat_outputs = [
+            # Even-though it may look like we're transforming all inputs, we don't:
+            # _transform() will only care about BoundingBoxeses and the labels
+            self._transform(inpt, params)
+            for inpt in flat_inputs
+        ]
 
         return tree_unflatten(flat_outputs, spec)
 
-    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        is_label = params["labels"] is not None and any(inpt is label for label in params["labels"])
+    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        is_label = inpt is not None and inpt is params["labels"]
         is_bounding_boxes_or_mask = isinstance(inpt, (tv_tensors.BoundingBoxes, tv_tensors.Mask))
 
         if not (is_label or is_bounding_boxes_or_mask):
@@ -447,5 +403,5 @@ class SanitizeBoundingBoxes(Transform):
 
         if is_label:
             return output
-        else:
-            return tv_tensors.wrap(output, like=inpt)
+
+        return tv_tensors.wrap(output, like=inpt)

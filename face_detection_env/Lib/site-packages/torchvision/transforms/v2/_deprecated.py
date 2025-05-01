@@ -17,7 +17,6 @@ class ToTensor(Transform):
     .. warning::
         :class:`v2.ToTensor` is deprecated and will be removed in a future release.
         Please use instead ``v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])``.
-        Output is equivalent up to float precision.
 
     This transform does not support torchscript.
 
@@ -42,9 +41,8 @@ class ToTensor(Transform):
         warnings.warn(
             "The transform `ToTensor()` is deprecated and will be removed in a future release. "
             "Instead, please use `v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])`."
-            "Output is equivalent up to float precision."
         )
         super().__init__()
 
-    def transform(self, inpt: Union[PIL.Image.Image, np.ndarray], params: Dict[str, Any]) -> torch.Tensor:
+    def _transform(self, inpt: Union[PIL.Image.Image, np.ndarray], params: Dict[str, Any]) -> torch.Tensor:
         return _F.to_tensor(inpt)
