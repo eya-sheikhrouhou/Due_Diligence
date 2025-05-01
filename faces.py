@@ -11,6 +11,7 @@ import logging
 from PIL import Image
 import numpy as np
 import io
+import uuid
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -80,6 +81,11 @@ if input_method == "Face Recognition":
         st.warning("⚠️ Face Recognition requires MTCNN. Please select MTCNN as the model.")
     else:
         st.info("ℹ️ Upload a reference image and ensure browser webcam access is enabled.")
+        # Restart Stream Button
+        if st.button("🔄 Restart Stream"):
+            st.session_state.stream_key = str(uuid.uuid4())
+            st.session_state.reference_embedding = None
+            st.rerun()
         reference_image = st.file_uploader("Upload Reference Image", type=["jpg", "jpeg", "png"], accept_multiple_files=False)
         if reference_image:
             try:
@@ -95,8 +101,10 @@ if input_method == "Face Recognition":
                     # Placeholder for debug info
                     debug_placeholder = st.empty() if debug_mode else None
                     logger.info("Starting webrtc_streamer for face recognition")
+                    # Use dynamic key to force stream restart
+                    stream_key = st.session_state.get("stream_key", "face-recognition")
                     stream = webrtc_streamer(
-                        key="face-recognition",
+                        key=stream_key,
                         mode=WebRtcMode.SENDRECV,
                         video_processor_factory=lambda: FaceDetectionProcessor(
                             model_choice, dlib_model_type, dlib_upsample, confidence_threshold,
@@ -104,11 +112,18 @@ if input_method == "Face Recognition":
                             similarity_threshold=similarity_threshold, debug_placeholder=debug_placeholder
                         ),
                         rtc_configuration=RTC_CONFIG,
-                        media_stream_constraints={"video": {"width": {"ideal": 1280}, "height": {"ideal": 720}}, "audio": False},
+                        media_stream_constraints={
+                            "video": {
+                                "width": {"ideal": 640},
+                                "height": {"ideal": 480},
+                                "frameRate": {"ideal": 30}
+                            },
+                            "audio": False
+                        },
                         async_processing=True
                     )
                     if stream.state.playing is False:
-                        st.warning("⚠️ Webcam stream failed to start. Check browser permissions or try a different browser.")
+                        st.warning("⚠️ Webcam stream failed to start. Check browser permissions, webcam compatibility, or click 'Restart Stream'.")
                     if debug_mode:
                         st.write("Debug Info: Check terminal logs for embedding and similarity details.")
                 else:
@@ -129,11 +144,18 @@ elif input_method == "Real-Time Detection (Webcam)":
             show_landmarks, box_color, landmark_color, recognition_mode=False
         ),
         rtc_configuration=RTC_CONFIG,
-        media_stream_constraints={"video": {"width": {"ideal": 1280}, "height": {"ideal": 720}}, "audio": False},
+        media_stream_constraints={
+            "video": {
+                "width": {"ideal": 640},
+                "height": {"ideal": 480},
+                "frameRate": {"ideal": 30}
+            },
+            "audio": False
+        },
         async_processing=True
     )
     if stream.state.playing is False:
-        st.warning("⚠️ Webcam stream failed to start. Check browser permissions or try a different browser.")
+        st.warning("⚠️ Webcam stream failed to start. Check browser permissions or webcam compatibility.")
 
 # --- IP Camera ---
 elif input_method == "Use IP Camera":

@@ -1,0 +1,8 @@
+streamlit==1.25.0
+streamlit-webrtc==0.47.7
+facenet-pytorch==2.5.3
+opencv-python==4.8.0.76
+numpy==1.24.3
+torch==2.0.1
+torchvision==0.15.2
+dlib==19.24.2

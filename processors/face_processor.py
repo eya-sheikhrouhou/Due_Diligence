@@ -27,20 +27,18 @@ class FaceDetectionProcessor(VideoProcessorBase):
         self.match_color_rgb = (0, 255, 0)  # Green for matches
         self.no_match_color_rgb = (255, 0, 0)  # Red for non-matches
         self.debug_placeholder = debug_placeholder
-        logger.debug(f"Initializing FaceDetectionProcessor: model={model_choice}, recognition_mode={recognition_mode}, similarity_threshold={similarity_threshold}")
         # Initialize MTCNN
         if "mtcnn_detector" not in st.session_state or st.session_state.mtcnn_detector is None:
             from config.settings import get_gpu_status
             try:
                 _, device = get_gpu_status()
                 st.session_state.mtcnn_detector = MTCNN(
-                    keep_all=True, device=device, min_face_size=15,
-                    thresholds=[0.4, 0.5, 0.5], factor=0.709
+                    keep_all=True, device=device, min_face_size=20,
+                    thresholds=[0.6, 0.7, 0.7], factor=0.709
                 )
                 logger.info("MTCNN detector initialized in FaceDetectionProcessor.")
             except Exception as e:
                 st.error(f"❌ Failed to initialize MTCNN detector: {e}")
-                logger.error(f"MTCNN initialization error: {e}")
                 st.session_state.mtcnn_detector = None
         self.mtcnn = st.session_state.mtcnn_detector
         # Initialize InceptionResnetV1 for recognition
@@ -52,7 +50,6 @@ class FaceDetectionProcessor(VideoProcessorBase):
                 logger.info("InceptionResnetV1 initialized in FaceDetectionProcessor.")
             except Exception as e:
                 st.error(f"❌ Failed to initialize InceptionResnetV1: {e}")
-                logger.error(f"InceptionResnetV1 initialization error: {e}")
                 st.session_state.resnet = None
         self.resnet = st.session_state.resnet if self.recognition_mode else None
         # Initialize DLib
@@ -69,7 +66,6 @@ class FaceDetectionProcessor(VideoProcessorBase):
                     st.session_state.dlib_detector = dlib.get_frontal_face_detector()
             except Exception as e:
                 st.error(f"❌ Failed to initialize DLib detector: {e}")
-                logger.error(f"DLib detector initialization error: {e}")
                 st.session_state.dlib_detector = None
         if "dlib_predictor" not in st.session_state or st.session_state.dlib_predictor is None:
             try:
@@ -81,7 +77,6 @@ class FaceDetectionProcessor(VideoProcessorBase):
                     st.session_state.dlib_predictor = dlib.shape_predictor(shape_predictor_path)
             except Exception as e:
                 st.error(f"❌ Failed to initialize DLib predictor: {e}")
-                logger.error(f"DLib predictor initialization error: {e}")
                 st.session_state.dlib_predictor = None
         self.dlib_detector = st.session_state.dlib_detector
         self.dlib_predictor = st.session_state.dlib_predictor
@@ -92,7 +87,6 @@ class FaceDetectionProcessor(VideoProcessorBase):
             logger.error("MTCNN or Resnet not initialized.")
             return None
         try:
-            logger.debug(f"Computing embedding for frame: shape={img_rgb.shape}")
             # Detect faces and get aligned face crops
             faces_cropped = self.mtcnn(img_rgb, save_path=None)
             if faces_cropped is None or len(faces_cropped) == 0:
@@ -100,7 +94,6 @@ class FaceDetectionProcessor(VideoProcessorBase):
                 return None
             # Compute embedding for the first detected face
             face_tensor = faces_cropped[0].unsqueeze(0)  # Add batch dimension
-            logger.debug(f"Face tensor shape: {face_tensor.shape}")
             if torch.cuda.is_available():
                 face_tensor = face_tensor.cuda()
             with torch.no_grad():
@@ -137,14 +130,11 @@ class FaceDetectionProcessor(VideoProcessorBase):
     def process_frame(self, img_rgb, scale):
         from detectors.mtcnn_detector import detect_faces_mtcnn
         from detectors.dlib_detector import detect_faces_dlib
-        logger.debug(f"Processing frame: recognition_mode={self.recognition_mode}, has_reference={'reference_embedding' in st.session_state}, frame_shape={img_rgb.shape}")
         if self.model_choice == "MTCNN":
             faces = detect_faces_mtcnn(img_rgb, self.show_landmarks, self.confidence_threshold)
         else:
             faces = detect_faces_dlib(img_rgb, self.dlib_model_type, self.dlib_upsample, self.show_landmarks)
-        logger.debug(f"Detected {len(faces)} faces in frame")
         if self.recognition_mode and faces and "reference_embedding" in st.session_state and st.session_state.reference_embedding is not None:
-            logger.debug("Entering recognition block")
             current_embedding = self.compute_embedding(img_rgb)
             if current_embedding is not None:
                 similarity = self.cosine_similarity(st.session_state.reference_embedding, current_embedding)
@@ -155,21 +145,14 @@ class FaceDetectionProcessor(VideoProcessorBase):
                     # Update debug UI if enabled
                     if self.debug_placeholder is not None:
                         self.debug_placeholder.write(f"Similarity: {similarity:.2f}, Match: {face['is_match']}")
-            else:
-                logger.warning("No embedding computed for frame, skipping recognition")
-                if self.debug_placeholder is not None:
-                    self.debug_placeholder.write("No face detected in webcam frame")
         else:
-            logger.debug(f"Recognition skipped: no_faces={not faces}, no_reference={'reference_embedding' not in st.session_state or st.session_state.reference_embedding is None}, recognition_mode={self.recognition_mode}")
-            if self.recognition_mode and self.debug_placeholder is not None and not faces:
-                self.debug_placeholder.write("No face detected in webcam frame")
+            logger.debug("No faces or reference embedding for recognition.")
         return faces
 
     def recv(self, frame):
         try:
             img = frame.to_ndarray(format="bgr24")
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            logger.debug(f"Received frame: shape={img_rgb.shape}")
             img_processed, scale = preprocess_image(img_rgb)
             faces = self.process_frame(img_processed, scale)
             count = 0
@@ -190,11 +173,9 @@ class FaceDetectionProcessor(VideoProcessorBase):
                 if self.recognition_mode and 'is_match' in face and face['similarity'] is not None:
                     box_color = self.match_color_rgb if face['is_match'] else self.no_match_color_rgb
                     text = f"{'Match' if face['is_match'] else 'No Match'} ({face['similarity']:.2f})"
-                    logger.debug(f"Drawing box: color={'green' if face['is_match'] else 'red'}, text={text}")
                 else:
                     box_color = self.box_color_rgb
                     text = f"{confidence:.2f}"
-                    logger.debug(f"Drawing box: color=user-defined, text={text}")
                 draw_rectangle(img_rgb, (x, y), (x + width, y + height), box_color)
                 draw_text(img_rgb, text, (x, y - 10), box_color)
                 if self.show_landmarks:
@@ -203,9 +184,6 @@ class FaceDetectionProcessor(VideoProcessorBase):
                         draw_circle(img_rgb, (px, py), self.landmark_color_rgb)
                 count += 1
             st.session_state.total_faces_detected = count
-            logger.debug(f"Processed frame: detected {count} faces")
-            if count == 0 and self.recognition_mode and self.debug_placeholder is not None:
-                self.debug_placeholder.write("No face detected in webcam frame")
             return av.VideoFrame.from_ndarray(cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR), format="bgr24")
         except Exception as e:
             logger.error(f"Real-time detection error: {e}")
