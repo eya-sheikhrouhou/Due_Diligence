@@ -15,7 +15,7 @@ from processors.face_processor import FaceDetectionProcessor
 logger = logging.getLogger(__name__)
 
 class VideoFileProcessor:
-    def __init__(self, video_path, model_choice, dlib_model_type, dlib_upsample, confidence_threshold, show_landmarks, box_color, landmark_color, playback_speed):
+    def __init__(self, video_path, model_choice, dlib_model_type, dlib_upsample, confidence_threshold, show_landmarks, box_color, landmark_color, playback_speed, recognizer=None):
         self.video_path = video_path
         self.model_choice = model_choice
         self.dlib_model_type = dlib_model_type
@@ -69,7 +69,7 @@ class VideoFileProcessor:
         self.dlib_predictor = st.session_state.dlib_predictor
         self.face_processor = FaceDetectionProcessor(
             model_choice, dlib_model_type, dlib_upsample, confidence_threshold,
-            show_landmarks, box_color, landmark_color
+            show_landmarks, box_color, landmark_color, recognizer=recognizer
         )
 
     def process_video(self, frame_placeholder, progress_bar, save_video, save_dir, filename_prefix):
@@ -114,8 +114,10 @@ class VideoFileProcessor:
                     if width <= 0 or height <= 0:
                         continue
                     from utils.image_utils import draw_rectangle, draw_text, draw_circle
-                    draw_rectangle(img_rgb, (x, y), (x + width, y + height), self.box_color_rgb)
-                    draw_text(img_rgb, f"{confidence:.2f}", (x, y - 10), self.box_color_rgb)
+                    box_color = self.face_processor.match_color_rgb if 'is_match' in face and face['is_match'] else self.face_processor.no_match_color_rgb if 'is_match' in face else self.box_color_rgb
+                    text = f"{'Match' if 'is_match' in face and face['is_match'] else 'No Match'} ({face['similarity']:.2f})" if 'is_match' in face else f"{confidence:.2f}"
+                    draw_rectangle(img_rgb, (x, y), (x + width, y + height), box_color)
+                    draw_text(img_rgb, text, (x, y - 10), box_color)
                     if self.show_landmarks:
                         for key, (px, py) in face['keypoints'].items():
                             px, py = int(px / scale), int(py / scale)

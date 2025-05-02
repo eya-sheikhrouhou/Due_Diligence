@@ -3,18 +3,20 @@ import streamlit as st
 import cv2
 import numpy as np
 import av
-from facenet_pytorch import MTCNN, InceptionResnetV1
 import dlib
 import os
 import logging
-import torch
 from utils.image_utils import preprocess_image
 from utils.misc_utils import hex_to_rgb
+from detectors.mtcnn_detector import detect_faces_mtcnn
+from detectors.dlib_detector import detect_faces_dlib
+from facenet_pytorch import MTCNN
+import torch
 
 logger = logging.getLogger(__name__)
 
 class FaceDetectionProcessor(VideoProcessorBase):
-    def __init__(self, model_choice, dlib_model_type, dlib_upsample, confidence_threshold, show_landmarks, box_color, landmark_color, recognition_mode=False, similarity_threshold=0.8, debug_placeholder=None):
+    def __init__(self, model_choice, dlib_model_type, dlib_upsample, confidence_threshold, show_landmarks, box_color, landmark_color, recognizer=None, similarity_threshold=0.6, debug_placeholder=None):
         self.model_choice = model_choice
         self.dlib_model_type = dlib_model_type
         self.dlib_upsample = dlib_upsample
@@ -22,37 +24,25 @@ class FaceDetectionProcessor(VideoProcessorBase):
         self.show_landmarks = show_landmarks
         self.box_color_rgb = hex_to_rgb(box_color)
         self.landmark_color_rgb = hex_to_rgb(landmark_color)
-        self.recognition_mode = recognition_mode
+        self.recognizer = recognizer
         self.similarity_threshold = similarity_threshold
         self.match_color_rgb = (0, 255, 0)  # Green for matches
         self.no_match_color_rgb = (255, 0, 0)  # Red for non-matches
         self.debug_placeholder = debug_placeholder
-        # Initialize MTCNN
         if "mtcnn_detector" not in st.session_state or st.session_state.mtcnn_detector is None:
             from config.settings import get_gpu_status
             try:
                 _, device = get_gpu_status()
                 st.session_state.mtcnn_detector = MTCNN(
                     keep_all=True, device=device, min_face_size=20,
-                    thresholds=[0.6, 0.7, 0.7], factor=0.709
+                    thresholds=[0.4, 0.5, 0.5], factor=0.709
                 )
                 logger.info("MTCNN detector initialized in FaceDetectionProcessor.")
             except Exception as e:
                 st.error(f"❌ Failed to initialize MTCNN detector: {e}")
+                logger.error(f"MTCNN Initialization Error: {e}")
                 st.session_state.mtcnn_detector = None
         self.mtcnn = st.session_state.mtcnn_detector
-        # Initialize InceptionResnetV1 for recognition
-        if self.recognition_mode and ("resnet" not in st.session_state or st.session_state.resnet is None):
-            from config.settings import get_gpu_status
-            try:
-                _, device = get_gpu_status()
-                st.session_state.resnet = InceptionResnetV1(pretrained='vggface2').eval().to(device)
-                logger.info("InceptionResnetV1 initialized in FaceDetectionProcessor.")
-            except Exception as e:
-                st.error(f"❌ Failed to initialize InceptionResnetV1: {e}")
-                st.session_state.resnet = None
-        self.resnet = st.session_state.resnet if self.recognition_mode else None
-        # Initialize DLib
         if "dlib_detector" not in st.session_state or st.session_state.dlib_detector is None:
             try:
                 if self.model_choice == "DLib" and self.dlib_model_type == "CNN (more accurate)":
@@ -66,6 +56,7 @@ class FaceDetectionProcessor(VideoProcessorBase):
                     st.session_state.dlib_detector = dlib.get_frontal_face_detector()
             except Exception as e:
                 st.error(f"❌ Failed to initialize DLib detector: {e}")
+                logger.error(f"DLib Initialization Error: {e}")
                 st.session_state.dlib_detector = None
         if "dlib_predictor" not in st.session_state or st.session_state.dlib_predictor is None:
             try:
@@ -77,82 +68,118 @@ class FaceDetectionProcessor(VideoProcessorBase):
                     st.session_state.dlib_predictor = dlib.shape_predictor(shape_predictor_path)
             except Exception as e:
                 st.error(f"❌ Failed to initialize DLib predictor: {e}")
+                logger.error(f"DLib Predictor Initialization Error: {e}")
                 st.session_state.dlib_predictor = None
         self.dlib_detector = st.session_state.dlib_detector
         self.dlib_predictor = st.session_state.dlib_predictor
 
-    def compute_embedding(self, img_rgb):
-        """Compute facial embedding for a single face using InceptionResnetV1."""
-        if self.resnet is None or self.mtcnn is None:
-            logger.error("MTCNN or Resnet not initialized.")
-            return None
+    def preprocess_frame(self, image):
+        """Normalize brightness and contrast of the input frame."""
         try:
-            # Detect faces and get aligned face crops
-            faces_cropped = self.mtcnn(img_rgb, save_path=None)
-            if faces_cropped is None or len(faces_cropped) == 0:
-                logger.warning("No faces detected in frame for embedding.")
-                return None
-            # Compute embedding for the first detected face
-            face_tensor = faces_cropped[0].unsqueeze(0)  # Add batch dimension
-            if torch.cuda.is_available():
-                face_tensor = face_tensor.cuda()
-            with torch.no_grad():
-                embedding = self.resnet(face_tensor).cpu().numpy().flatten()
-            logger.debug(f"Computed frame embedding shape: {embedding.shape}, norm={np.linalg.norm(embedding):.2f}")
-            return embedding
+            img_lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            img_lab[:, :, 0] = clahe.apply(img_lab[:, :, 0])
+            img_normalized = cv2.cvtColor(img_lab, cv2.COLOR_LAB2RGB)
+            return img_normalized
         except Exception as e:
-            logger.error(f"Embedding computation error: {e}")
-            return None
-
-    def cosine_similarity(self, emb1, emb2):
-        """Compute cosine similarity between two embeddings."""
-        if emb1 is None or emb2 is None:
-            logger.warning("One or both embeddings are None.")
-            return 0.0
-        try:
-            # Normalize embeddings
-            norm1 = np.linalg.norm(emb1)
-            norm2 = np.linalg.norm(emb2)
-            if norm1 == 0 or norm2 == 0:
-                logger.warning("Zero norm detected in embeddings.")
-                return 0.0
-            emb1_norm = emb1 / norm1
-            emb2_norm = emb2 / norm2
-            similarity = np.dot(emb1_norm, emb2_norm)
-            # Clamp to [-1, 1] to avoid floating-point errors
-            similarity = np.clip(similarity, -1.0, 1.0)
-            logger.debug(f"Cosine similarity: {similarity:.2f}")
-            return similarity
-        except Exception as e:
-            logger.error(f"Cosine similarity error: {e}")
-            return 0.0
+            logger.error(f"Frame Preprocessing Error: {e}")
+            return image
 
     def process_frame(self, img_rgb, scale):
-        from detectors.mtcnn_detector import detect_faces_mtcnn
-        from detectors.dlib_detector import detect_faces_dlib
-        if self.model_choice == "MTCNN":
-            faces = detect_faces_mtcnn(img_rgb, self.show_landmarks, self.confidence_threshold)
-        else:
-            faces = detect_faces_dlib(img_rgb, self.dlib_model_type, self.dlib_upsample, self.show_landmarks)
-        if self.recognition_mode and faces and "reference_embedding" in st.session_state and st.session_state.reference_embedding is not None:
-            current_embedding = self.compute_embedding(img_rgb)
-            if current_embedding is not None:
-                similarity = self.cosine_similarity(st.session_state.reference_embedding, current_embedding)
-                for face in faces:
-                    face['similarity'] = similarity
-                    face['is_match'] = similarity >= self.similarity_threshold
-                    logger.info(f"Face detected: similarity={similarity:.2f}, is_match={face['is_match']}")
-                    # Update debug UI if enabled
+        # Perform face detection only if recognizer is None (e.g., Real-Time Detection mode)
+        if self.recognizer is None:
+            faces = []
+            try:
+                if self.model_choice == "MTCNN":
+                    faces = detect_faces_mtcnn(img_rgb, self.show_landmarks, self.confidence_threshold)
+                    logger.debug(f"Detection-only mode: Detected {len(faces)} faces")
+                else:
+                    faces = detect_faces_dlib(img_rgb, self.dlib_model_type, self.dlib_upsample, self.show_landmarks)
+                    logger.debug(f"Detection-only mode: Detected {len(faces)} faces")
+            except Exception as e:
+                logger.error(f"Detection Error: {e}")
+                faces = []
+            return faces
+        # Perform face detection and recognition if recognizer is provided (e.g., Face Recognition mode)
+        faces = []
+        st.session_state.cropped_faces = []  # Reset cropped faces in session state
+        try:
+            if self.model_choice == "MTCNN":
+                faces = detect_faces_mtcnn(img_rgb, self.show_landmarks, self.confidence_threshold)
+                logger.debug(f"MTCNN detected {len(faces)} faces")
+            else:
+                faces = detect_faces_dlib(img_rgb, self.dlib_model_type, self.dlib_upsample, self.show_landmarks)
+                logger.debug(f"DLib detected {len(faces)} faces")
+        except Exception as e:
+            logger.error(f"Face Detection Error: {e}")
+            return faces
+        if faces and self.recognizer.reference_embedding is not None:
+            try:
+                logger.debug("Attempting to crop faces with MTCNN")
+                faces_cropped = self.mtcnn(img_rgb, save_path=None)
+                if faces_cropped is not None and len(faces_cropped) > 0:
+                    logger.debug(f"Cropped {len(faces_cropped)} faces")
+                    for i, face_tensor in enumerate(faces_cropped):
+                        if i >= len(faces):
+                            logger.debug(f"Skipping extra cropped face {i+1}: detected {len(faces)} faces")
+                            break
+                        logger.debug(f"Processing cropped face {i+1}: shape={face_tensor.shape}")
+                        if face_tensor.shape != (3, 160, 160):
+                            logger.error(f"Invalid face tensor shape for face {i+1}: {face_tensor.shape}")
+                            continue
+                        if torch.cuda.is_available():
+                            face_tensor = face_tensor.cuda()
+                        is_match, similarity = self.recognizer.recognize_face(face_tensor)
+                        faces[i]['similarity'] = similarity
+                        faces[i]['is_match'] = is_match
+                        logger.info(f"Face {i+1}: similarity={similarity:.2f}, is_match={is_match}")
+                        # Convert tensor to NumPy for display
+                        try:
+                            face_np = face_tensor.cpu().permute(1, 2, 0).numpy()
+                            face_np = (face_np * 255).astype(np.uint8)  # Assume [0, 1] range
+                            face_np = cv2.cvtColor(face_np, cv2.COLOR_RGB2BGR)
+                            st.session_state.cropped_faces.append({
+                                'image': face_np,
+                                'caption': f"Recognized Face {i+1}: {'Match' if is_match else 'No Match'} ({similarity:.2f})"
+                            })
+                            logger.debug(f"Added cropped face {i+1} to session state")
+                            # Trigger UI refresh
+                            st.session_state._update_cropped_faces = True
+                        except Exception as e:
+                            logger.error(f"Error converting cropped face {i+1}: {e}")
+                            continue
+                    # Update debug UI
                     if self.debug_placeholder is not None:
-                        self.debug_placeholder.write(f"Similarity: {similarity:.2f}, Match: {face['is_match']}")
+                        with self.debug_placeholder.container():
+                            if not st.session_state.cropped_faces:
+                                st.write("No faces recognized in this frame.")
+                                logger.debug("No cropped faces to display")
+                            else:
+                                logger.debug(f"Displaying {len(st.session_state.cropped_faces)} cropped faces")
+                                cols = st.columns(min(len(st.session_state.cropped_faces), 3))
+                                for idx, cropped_face in enumerate(st.session_state.cropped_faces):
+                                    with cols[idx % 3]:
+                                        st.image(cropped_face['image'], caption=cropped_face['caption'], use_container_width=True)
+                else:
+                    logger.debug("No faces cropped for recognition")
+                    if self.debug_placeholder is not None:
+                        with self.debug_placeholder.container():
+                            st.write("No faces recognized in this frame.")
+            except Exception as e:
+                logger.error(f"Recognition Error: {e}")
         else:
-            logger.debug("No faces or reference embedding for recognition.")
+            logger.debug("No faces or no reference embedding for recognition")
+            if self.debug_placeholder is not None:
+                with self.debug_placeholder.container():
+                    st.write("No faces recognized in this frame.")
         return faces
 
     def recv(self, frame):
         try:
             img = frame.to_ndarray(format="bgr24")
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            # Preprocess frame
+            img_rgb = self.preprocess_frame(img_rgb)
             img_processed, scale = preprocess_image(img_rgb)
             faces = self.process_frame(img_processed, scale)
             count = 0
@@ -160,6 +187,7 @@ class FaceDetectionProcessor(VideoProcessorBase):
                 x, y, width, height = face['box']
                 confidence = face['confidence']
                 if self.model_choice == "MTCNN" and confidence < self.confidence_threshold:
+                    logger.debug(f"Skipping face with low confidence: {confidence:.2f}")
                     continue
                 x, y = max(0, int(x / scale)), max(0, int(y / scale))
                 width, height = int(width / scale), int(height / scale)
@@ -167,23 +195,33 @@ class FaceDetectionProcessor(VideoProcessorBase):
                 x, y = max(0, x), max(0, y)
                 width, height = x_end - x, y_end - y
                 if width <= 0 or height <= 0:
+                    logger.debug(f"Skipping invalid bounding box: x={x}, y={y}, width={width}, height={height}")
                     continue
                 from utils.image_utils import draw_rectangle, draw_text, draw_circle
-                # Choose color and text based on recognition mode
-                if self.recognition_mode and 'is_match' in face and face['similarity'] is not None:
-                    box_color = self.match_color_rgb if face['is_match'] else self.no_match_color_rgb
-                    text = f"{'Match' if face['is_match'] else 'No Match'} ({face['similarity']:.2f})"
-                else:
+                # Use detection-only annotations if recognizer is None
+                if self.recognizer is None:
                     box_color = self.box_color_rgb
                     text = f"{confidence:.2f}"
-                draw_rectangle(img_rgb, (x, y), (x + width, y + height), box_color)
-                draw_text(img_rgb, text, (x, y - 10), box_color)
-                if self.show_landmarks:
-                    for key, (px, py) in face['keypoints'].items():
-                        px, py = int(px / scale), int(py / scale)
-                        draw_circle(img_rgb, (px, py), self.landmark_color_rgb)
-                count += 1
+                else:
+                    box_color = self.match_color_rgb if 'is_match' in face and face['is_match'] else self.no_match_color_rgb if 'is_match' in face else self.box_color_rgb
+                    text = f"{'Match' if 'is_match' in face and face['is_match'] else 'No Match'} ({face['similarity']:.2f})" if 'is_match' in face else f"{confidence:.2f}"
+                try:
+                    draw_rectangle(img_rgb, (x, y), (x + width, y + height), box_color)
+                    draw_text(img_rgb, text, (x, y - 10), box_color)
+                    if self.show_landmarks:
+                        for key, (px, py) in face['keypoints'].items():
+                            px, py = int(px / scale), int(py / scale)
+                            draw_circle(img_rgb, (px, py), self.landmark_color_rgb)
+                    count += 1
+                except Exception as e:
+                    logger.error(f"Rendering Error for face {count+1}: {e}")
+                    continue
             st.session_state.total_faces_detected = count
+            logger.debug(f"Processed frame: detected {count} faces")
+            # Trigger rerun if new faces were added
+            if st.session_state.get('_update_cropped_faces', False):
+                st.session_state._update_cropped_faces = False
+                st.rerun()
             return av.VideoFrame.from_ndarray(cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR), format="bgr24")
         except Exception as e:
             logger.error(f"Real-time detection error: {e}")

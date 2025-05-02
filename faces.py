@@ -2,8 +2,9 @@ import streamlit as st
 from streamlit_webrtc import webrtc_streamer, RTCConfiguration, WebRtcMode
 from config.settings import initialize_session_state, setup_page_config, get_gpu_status
 from utils.misc_utils import is_valid_url
-from utils.image_utils import save_image, process_uploaded_images, process_webcam_image, process_ip_camera, extract_reference_embedding
+from utils.image_utils import save_image, process_uploaded_images, process_webcam_image, process_ip_camera
 from processors.face_processor import FaceDetectionProcessor
+from processors.face_recognizer import FaceRecognizer
 from processors.video_processor import VideoFileProcessor
 from detectors.dlib_detector import load_dlib_models
 import os
@@ -23,6 +24,8 @@ logger.addFilter(SuppressScriptRunContextFilter())
 
 # --- Initialize Session State ---
 initialize_session_state()
+if "cropped_faces" not in st.session_state:
+    st.session_state.cropped_faces = []
 
 # --- Streamlit Page Config ---
 setup_page_config()
@@ -39,7 +42,7 @@ st.sidebar.header("Settings")
 debug_mode = st.sidebar.checkbox("Enable debug mode", value=False)
 model_choice = st.sidebar.radio("Choose Face Detection Model:", ["MTCNN", "DLib"])
 dlib_model_type = st.sidebar.radio("DLib Model Type:", ["HOG (faster)", "CNN (more accurate)"]) if model_choice == "DLib" else None
-confidence_threshold = st.sidebar.slider("Minimum confidence (MTCNN only):", 0.0, 1.0, 0.9, 0.01)
+confidence_threshold = st.sidebar.slider("Minimum confidence (MTCNN only):", 0.0, 1.0, 0.8, 0.01)
 dlib_upsample = st.sidebar.slider("DLib Upsampling (higher = better detection, slower):", 0, 3, 1, 1) if model_choice == "DLib" else 1
 show_landmarks = st.sidebar.checkbox("Show Facial Landmarks", value=True)
 box_color = st.sidebar.color_picker("Bounding Box Color:", "#800000")  # Default: dark red
@@ -47,7 +50,7 @@ landmark_color = st.sidebar.color_picker("Landmark Color:", "#FF0000")  # Defaul
 ip_timeout = st.sidebar.slider("IP Camera Timeout (seconds):", 1, 10, 5, 1)
 max_retries = st.sidebar.slider("IP Camera Retry Attempts:", 1, 5, 3, 1)
 playback_speed = st.sidebar.slider("Video Playback Speed:", 0.5, 2.0, 1.0, 0.1)
-similarity_threshold = st.sidebar.slider("Face Recognition Similarity Threshold:", 0.0, 1.0, 0.8, 0.01) if model_choice == "MTCNN" else 0.8
+similarity_threshold = st.sidebar.slider("Face Recognition Similarity Threshold:", 0.0, 1.0, 0.6, 0.01) if model_choice == "MTCNN" else 0.6
 max_file_size_mb = 5  # Limit uploaded file size
 
 # --- Display Total Face Count in Sidebar ---
@@ -85,31 +88,51 @@ if input_method == "Face Recognition":
         if st.button("🔄 Restart Stream"):
             st.session_state.stream_key = str(uuid.uuid4())
             st.session_state.reference_embedding = None
+            st.session_state.cropped_faces = []
             st.rerun()
         reference_image = st.file_uploader("Upload Reference Image", type=["jpg", "jpeg", "png"], accept_multiple_files=False)
         if reference_image:
             try:
-                # Clear previous reference embedding
-                if "reference_embedding" in st.session_state:
-                    del st.session_state.reference_embedding
+                # Display reference image
+                logger.info("Loading reference image")
                 pil_image = Image.open(reference_image).convert("RGB")
                 st.image(pil_image, caption="Reference Image", use_container_width=True)
-                embedding = extract_reference_embedding(pil_image)
-                if embedding is not None:
-                    st.session_state.reference_embedding = embedding
+                # Initialize FaceRecognizer
+                logger.info("Initializing FaceRecognizer")
+                recognizer = FaceRecognizer(similarity_threshold=similarity_threshold)
+                image_np = np.array(pil_image)
+                logger.info(f"Processing reference image: size={image_np.shape}")
+                recognizer.set_reference_embedding(image_np)
+                if recognizer.reference_embedding is not None:
+                    st.session_state.reference_embedding = recognizer.reference_embedding
                     st.success("✅ Reference image processed successfully.")
-                    # Placeholder for debug info
-                    debug_placeholder = st.empty() if debug_mode else None
+                    # Display cropped face from reference image
+                    cropped_faces_container = st.container()
+                    with cropped_faces_container:
+                        st.markdown("### Recognized Faces")
+                        if st.session_state.cropped_faces:
+                            cols = st.columns(min(len(st.session_state.cropped_faces), 3))
+                            for idx, cropped_face in enumerate(st.session_state.cropped_faces):
+                                with cols[idx % 3]:
+                                    st.image(cropped_face['image'], caption=cropped_face['caption'], use_container_width=True)
+                        else:
+                            st.write("No faces detected in the reference image.")
+                    # Debug info
+                    debug_placeholder = st.container() if debug_mode else None
+                    if debug_mode:
+                        with debug_placeholder:
+                            st.write("Debug Info: Check terminal logs for embedding, similarity, and cropped face details.")
+                            st.write(f"Cropped Faces Container Status: {len(st.session_state.cropped_faces)} faces displayed (from reference image).")
+                    # Webcam stream for face recognition
                     logger.info("Starting webrtc_streamer for face recognition")
-                    # Use dynamic key to force stream restart
                     stream_key = st.session_state.get("stream_key", "face-recognition")
                     stream = webrtc_streamer(
                         key=stream_key,
                         mode=WebRtcMode.SENDRECV,
                         video_processor_factory=lambda: FaceDetectionProcessor(
                             model_choice, dlib_model_type, dlib_upsample, confidence_threshold,
-                            show_landmarks, box_color, landmark_color, recognition_mode=True,
-                            similarity_threshold=similarity_threshold, debug_placeholder=debug_placeholder
+                            show_landmarks, box_color, landmark_color, recognizer=recognizer,
+                            similarity_threshold=similarity_threshold, debug_placeholder=None  # Not used for webcam faces here
                         ),
                         rtc_configuration=RTC_CONFIG,
                         media_stream_constraints={
@@ -124,10 +147,10 @@ if input_method == "Face Recognition":
                     )
                     if stream.state.playing is False:
                         st.warning("⚠️ Webcam stream failed to start. Check browser permissions, webcam compatibility, or click 'Restart Stream'.")
-                    if debug_mode:
-                        st.write("Debug Info: Check terminal logs for embedding and similarity details.")
+                        logger.warning("Webcam stream failed to start")
                 else:
                     st.error("❌ No face detected in the reference image.")
+                    logger.error("Reference image processing failed: no face detected")
             except Exception as e:
                 st.error(f"❌ Error processing reference image: {e}")
                 logger.error(f"Reference Image Error: {e}")
@@ -137,11 +160,11 @@ elif input_method == "Real-Time Detection (Webcam)":
     st.info("ℹ️ Ensure browser webcam access is enabled.")
     logger.info("Starting webrtc_streamer for real-time detection")
     stream = webrtc_streamer(
-        key="face-detection",
+        key=st.session_state.get("stream_key", "face-detection"),
         mode=WebRtcMode.SENDRECV,
         video_processor_factory=lambda: FaceDetectionProcessor(
             model_choice, dlib_model_type, dlib_upsample, confidence_threshold,
-            show_landmarks, box_color, landmark_color, recognition_mode=False
+            show_landmarks, box_color, landmark_color, recognizer=None
         ),
         rtc_configuration=RTC_CONFIG,
         media_stream_constraints={
@@ -156,6 +179,7 @@ elif input_method == "Real-Time Detection (Webcam)":
     )
     if stream.state.playing is False:
         st.warning("⚠️ Webcam stream failed to start. Check browser permissions or webcam compatibility.")
+        logger.warning("Webcam stream failed to start")
 
 # --- IP Camera ---
 elif input_method == "Use IP Camera":
