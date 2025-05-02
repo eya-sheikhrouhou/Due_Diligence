@@ -86,23 +86,8 @@ class FaceDetectionProcessor(VideoProcessorBase):
             return image
 
     def process_frame(self, img_rgb, scale):
-        # Perform face detection only if recognizer is None (e.g., Real-Time Detection mode)
-        if self.recognizer is None:
-            faces = []
-            try:
-                if self.model_choice == "MTCNN":
-                    faces = detect_faces_mtcnn(img_rgb, self.show_landmarks, self.confidence_threshold)
-                    logger.debug(f"Detection-only mode: Detected {len(faces)} faces")
-                else:
-                    faces = detect_faces_dlib(img_rgb, self.dlib_model_type, self.dlib_upsample, self.show_landmarks)
-                    logger.debug(f"Detection-only mode: Detected {len(faces)} faces")
-            except Exception as e:
-                logger.error(f"Detection Error: {e}")
-                faces = []
-            return faces
-        # Perform face detection and recognition if recognizer is provided (e.g., Face Recognition mode)
+        # Perform face detection (for both modes)
         faces = []
-        st.session_state.cropped_faces = []  # Reset cropped faces in session state
         try:
             if self.model_choice == "MTCNN":
                 faces = detect_faces_mtcnn(img_rgb, self.show_landmarks, self.confidence_threshold)
@@ -113,12 +98,15 @@ class FaceDetectionProcessor(VideoProcessorBase):
         except Exception as e:
             logger.error(f"Face Detection Error: {e}")
             return faces
-        if faces and self.recognizer.reference_embedding is not None:
+
+        # Perform face recognition only if recognizer is provided (Face Recognition mode)
+        if self.recognizer is not None and self.recognizer.reference_embedding is not None:
             try:
-                logger.debug("Attempting to crop faces with MTCNN")
+                logger.debug("Attempting to crop faces with MTCNN for recognition")
                 faces_cropped = self.mtcnn(img_rgb, save_path=None)
                 if faces_cropped is not None and len(faces_cropped) > 0:
                     logger.debug(f"Cropped {len(faces_cropped)} faces")
+                    st.session_state.cropped_faces = []  # Reset cropped faces
                     for i, face_tensor in enumerate(faces_cropped):
                         if i >= len(faces):
                             logger.debug(f"Skipping extra cropped face {i+1}: detected {len(faces)} faces")
@@ -143,35 +131,29 @@ class FaceDetectionProcessor(VideoProcessorBase):
                                 'caption': f"Recognized Face {i+1}: {'Match' if is_match else 'No Match'} ({similarity:.2f})"
                             })
                             logger.debug(f"Added cropped face {i+1} to session state")
-                            # Trigger UI refresh
-                            st.session_state._update_cropped_faces = True
                         except Exception as e:
                             logger.error(f"Error converting cropped face {i+1}: {e}")
                             continue
-                    # Update debug UI
-                    if self.debug_placeholder is not None:
-                        with self.debug_placeholder.container():
-                            if not st.session_state.cropped_faces:
-                                st.write("No faces recognized in this frame.")
-                                logger.debug("No cropped faces to display")
-                            else:
-                                logger.debug(f"Displaying {len(st.session_state.cropped_faces)} cropped faces")
-                                cols = st.columns(min(len(st.session_state.cropped_faces), 3))
-                                for idx, cropped_face in enumerate(st.session_state.cropped_faces):
-                                    with cols[idx % 3]:
-                                        st.image(cropped_face['image'], caption=cropped_face['caption'], use_container_width=True)
                 else:
                     logger.debug("No faces cropped for recognition")
-                    if self.debug_placeholder is not None:
-                        with self.debug_placeholder.container():
-                            st.write("No faces recognized in this frame.")
+                    st.session_state.cropped_faces = []
             except Exception as e:
                 logger.error(f"Recognition Error: {e}")
-        else:
-            logger.debug("No faces or no reference embedding for recognition")
-            if self.debug_placeholder is not None:
-                with self.debug_placeholder.container():
+                st.session_state.cropped_faces = []
+
+        # Update debug UI if in Face Recognition mode
+        if self.recognizer is not None and self.debug_placeholder is not None:
+            with self.debug_placeholder.container():
+                if not st.session_state.cropped_faces:
                     st.write("No faces recognized in this frame.")
+                    logger.debug("No cropped faces to display")
+                else:
+                    logger.debug(f"Displaying {len(st.session_state.cropped_faces)} cropped faces")
+                    cols = st.columns(min(len(st.session_state.cropped_faces), 3))
+                    for idx, cropped_face in enumerate(st.session_state.cropped_faces):
+                        with cols[idx % 3]:
+                            st.image(cropped_face['image'], caption=cropped_face['caption'], use_container_width=True)
+
         return faces
 
     def recv(self, frame):
@@ -218,8 +200,8 @@ class FaceDetectionProcessor(VideoProcessorBase):
                     continue
             st.session_state.total_faces_detected = count
             logger.debug(f"Processed frame: detected {count} faces")
-            # Trigger rerun if new faces were added
-            if st.session_state.get('_update_cropped_faces', False):
+            # Trigger rerun only if in Face Recognition mode and new faces were added
+            if self.recognizer is not None and st.session_state.get('_update_cropped_faces', False):
                 st.session_state._update_cropped_faces = False
                 st.rerun()
             return av.VideoFrame.from_ndarray(cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR), format="bgr24")
