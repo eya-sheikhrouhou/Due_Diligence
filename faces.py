@@ -37,22 +37,6 @@ st.write(f"GPU Available: {gpu_available} (Using {'GPU' if gpu_available else 'C
 # --- Title ---
 st.title("📷 Enhanced Face Detection with MTCNN or DLib")
 
-# --- Sidebar Controls ---
-st.sidebar.header("Settings")
-debug_mode = st.sidebar.checkbox("Enable debug mode", value=False)
-model_choice = st.sidebar.radio("Choose Face Detection Model:", ["MTCNN", "DLib"])
-dlib_model_type = st.sidebar.radio("DLib Model Type:", ["HOG (faster)", "CNN (more accurate)"]) if model_choice == "DLib" else None
-confidence_threshold = st.sidebar.slider("Minimum confidence (MTCNN only):", 0.0, 1.0, 0.8, 0.01)
-dlib_upsample = st.sidebar.slider("DLib Upsampling (higher = better detection, slower):", 0, 3, 1, 1) if model_choice == "DLib" else 1
-show_landmarks = st.sidebar.checkbox("Show Facial Landmarks", value=True)
-box_color = st.sidebar.color_picker("Bounding Box Color:", "#800000")  # Default: dark red
-landmark_color = st.sidebar.color_picker("Landmark Color:", "#FF0000")  # Default: bright red
-ip_timeout = st.sidebar.slider("IP Camera Timeout (seconds):", 1, 10, 5, 1)
-max_retries = st.sidebar.slider("IP Camera Retry Attempts:", 1, 5, 3, 1)
-playback_speed = st.sidebar.slider("Video Playback Speed:", 0.5, 2.0, 1.0, 0.1)
-similarity_threshold = st.sidebar.slider("Face Recognition Similarity Threshold:", 0.0, 1.0, 0.6, 0.01) if model_choice == "MTCNN" else 0.6
-max_file_size_mb = 5  # Limit uploaded file size
-
 # --- Display Total Face Count in Sidebar ---
 if "total_faces_detected" not in st.session_state:
     st.session_state.total_faces_detected = 0
@@ -68,6 +52,26 @@ input_method = st.radio(
     ["Use IP Camera", "Use Local Webcam", "Upload Images", "Upload Video", "Real-Time Detection (Webcam)", "Face Recognition"],
     key="input_method_radio"
 )
+
+# --- Sidebar Controls ---
+st.sidebar.header("Settings")
+debug_mode = st.sidebar.checkbox("Enable debug mode", value=False)
+model_choice = st.sidebar.radio("Choose Face Detection Model:", ["MTCNN", "DLib"])
+dlib_model_type = st.sidebar.radio("DLib Model Type:", ["HOG (faster)", "CNN (more accurate)"]) if model_choice == "DLib" else None
+confidence_threshold = st.sidebar.slider("Minimum confidence (MTCNN only):", 0.0, 1.0, 0.8, 0.01) if model_choice == "MTCNN" else None
+similarity_threshold = st.sidebar.slider("Face Recognition Similarity Threshold:", 0.0, 1.0, 0.6, 0.01) if (model_choice == "MTCNN") and (input_method == "Face Recognition") else 0.6
+dlib_upsample = st.sidebar.slider("DLib Upsampling (higher = better detection, slower):", 0, 3, 1, 1) if model_choice == "DLib" else 1
+if input_method == "Use IP Camera":
+    ip_timeout = st.sidebar.slider("IP Camera Timeout (seconds):", 1, 10, 5, 1)
+    max_retries = st.sidebar.slider("IP Camera Retry Attempts:", 1, 5, 3, 1)
+else:
+    ip_timeout = None
+    max_retries = None 
+show_landmarks = st.sidebar.checkbox("Show Facial Landmarks", value=True)
+box_color = st.sidebar.color_picker("Bounding Box Color:", "#800000")  # Default: dark red
+landmark_color = st.sidebar.color_picker("Landmark Color:", "#FF0000")  # Default: bright red
+playback_speed = st.sidebar.slider("Video Playback Speed:", 0.5, 2.0, 1.0, 0.1) if input_method == "Upload Video" else None
+max_file_size_mb = 5  # Limit uploaded file size
 
 # --- WebRTC Configuration ---
 RTC_CONFIG = RTCConfiguration({
@@ -321,5 +325,7 @@ if st.session_state.captured_images and input_method not in ["Real-Time Detectio
 
 # --- Clear Session ---
 if st.button("Clear"):
+    current_input_method = st.session_state.get("input_method_radio", "Use IP Camera")
     st.session_state.clear()
+    st.session_state.input_method_radio = current_input_method
     st.rerun()
