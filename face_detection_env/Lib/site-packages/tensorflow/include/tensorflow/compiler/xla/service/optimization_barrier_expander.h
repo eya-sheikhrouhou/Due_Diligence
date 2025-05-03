@@ -1,4 +1,4 @@
-/* Copyright 2021 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2021 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,7 +27,6 @@ class OptimizationBarrierExpander : public HloModulePass {
 
   absl::string_view name() const override { return "cse_barrier_expander"; }
 
- protected:
   using HloPassInterface::Run;
   StatusOr<bool> Run(
       HloModule* module,
