@@ -22,6 +22,8 @@ class FaceRecognizer:
             self.resnet = InceptionResnetV1(pretrained='vggface2').eval().to(device)
             self.similarity_threshold = similarity_threshold
             self.reference_embedding = None
+            self.match_color_rgb = (0, 255, 0)  # Green for match
+            self.no_match_color_rgb = (255, 0, 0)  # Red for no match
             st.info("InceptionResnetV1 initialized successfully.")
             logger.info("FaceRecognizer initialized with MTCNN and InceptionResnetV1.")
         except Exception as e:

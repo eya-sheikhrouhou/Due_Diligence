@@ -2,7 +2,7 @@ import streamlit as st
 from streamlit_webrtc import webrtc_streamer, RTCConfiguration, WebRtcMode
 from config.settings import initialize_session_state, setup_page_config, get_gpu_status
 from utils.misc_utils import is_valid_url
-from utils.image_utils import save_image, process_uploaded_images, process_webcam_image, process_ip_camera
+from utils.image_utils import save_image, process_uploaded_images, process_webcam_image, process_ip_camera, hex_to_rgb
 from processors.face_processor import FaceDetectionProcessor
 from processors.face_recognizer import FaceRecognizer
 from processors.video_processor import VideoFileProcessor
@@ -13,6 +13,7 @@ from PIL import Image
 import numpy as np
 import io
 import uuid
+import torch  # Added to fix 'name torch is not defined' error
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -72,6 +73,36 @@ box_color = st.sidebar.color_picker("Bounding Box Color:", "#800000")  # Default
 landmark_color = st.sidebar.color_picker("Landmark Color:", "#FF0000")  # Default: bright red
 playback_speed = st.sidebar.slider("Video Playback Speed:", 0.5, 2.0, 1.0, 0.1) if input_method == "Upload Video" else None
 max_file_size_mb = 5  # Limit uploaded file size
+
+# --- Reference Image for Recognition (Common for All Modes) ---
+if (input_method != "Real-Time Detection (Webcam)") and (input_method != "Face Recognition") and (input_method != "Upload Video") :
+    st.subheader("Face Recognition Setup")
+    st.info("ℹ️ Upload a reference image to enable face recognition across all modes (requires MTCNN).")
+    reference_image = st.file_uploader("Upload Reference Image for Recognition", type=["jpg", "jpeg", "png"], accept_multiple_files=False, key="reference_uploader")
+    recognizer = None
+    if reference_image:
+        try:
+            logger.info("Loading reference image for recognition")
+            pil_image = Image.open(reference_image).convert("RGB")
+            st.image(pil_image, caption="Reference Image", use_container_width=True)
+            # Ensure MTCNN is selected for recognition
+            if model_choice != "MTCNN":
+                st.warning("⚠️ Face recognition requires MTCNN. Please select MTCNN as the model.")
+            else:
+                logger.info("Initializing FaceRecognizer")
+                recognizer = FaceRecognizer(similarity_threshold=similarity_threshold)
+                image_np = np.array(pil_image)
+                logger.info(f"Processing reference image: size={image_np.shape}")
+                recognizer.set_reference_embedding(image_np)
+                if recognizer.reference_embedding is not None:
+                    st.session_state.reference_embedding = recognizer.reference_embedding
+                    st.success("✅ Reference image processed successfully.")
+                else:
+                    st.error("❌ No face detected in the reference image.")
+                    logger.error("Reference image processing failed: no face detected")
+        except Exception as e:
+            st.error(f"❌ Error processing reference image: {e}")
+            logger.error(f"Reference Image Error: {e}")
 
 # --- WebRTC Configuration ---
 RTC_CONFIG = RTCConfiguration({
@@ -136,14 +167,14 @@ if input_method == "Face Recognition":
                         video_processor_factory=lambda: FaceDetectionProcessor(
                             model_choice, dlib_model_type, dlib_upsample, confidence_threshold,
                             show_landmarks, box_color, landmark_color, recognizer=recognizer,
-                            similarity_threshold=similarity_threshold, debug_placeholder=None  # Not used for webcam faces here
+                            similarity_threshold=similarity_threshold, debug_placeholder=None
                         ),
                         rtc_configuration=RTC_CONFIG,
                         media_stream_constraints={
                             "video": {
-                                "width": {"ideal": 640},
-                                "height": {"ideal": 480},
-                                "frameRate": {"ideal": 30}
+                                "width": {"ideal": 1280, "min": 640},
+                                "height": {"ideal": 720, "min": 480},
+                                "frameRate": {"ideal": 30, "max": 60, "min": 15}
                             },
                             "audio": False
                         },
@@ -173,16 +204,16 @@ elif input_method == "Real-Time Detection (Webcam)":
         rtc_configuration=RTC_CONFIG,
         media_stream_constraints={
             "video": {
-                "width": {"ideal": 640},
-                "height": {"ideal": 480},
-                "frameRate": {"ideal": 30}
+                "width": {"ideal": 1280, "min": 640},
+                "height": {"ideal": 720, "min": 480},
+                "frameRate": {"ideal": 30, "max": 60, "min": 15}
             },
             "audio": False
         },
         async_processing=True
     )
     if stream.state.playing is False:
-        st.warning("⚠️ Webcam stream failed to start. Check browser permissions or webcam compatibility.")
+        st.warning("⚠️ Webcam stream failed to start. Check browser_permissions or webcam compatibility.")
         logger.warning("Webcam stream failed to start")
 
 # --- IP Camera ---
@@ -257,6 +288,7 @@ if st.session_state.captured_images and input_method not in ["Real-Time Detectio
             from detectors.dlib_detector import detect_faces_dlib
             all_faces = []
             scales = []
+            detected_images = []  # Store annotated detected images
             for idx, (pil_image, _) in enumerate(st.session_state.captured_images):
                 from utils.image_utils import preprocess_image
                 image_np = np.array(pil_image.convert("RGB"), dtype=np.uint8)
@@ -318,10 +350,94 @@ if st.session_state.captured_images and input_method not in ["Real-Time Detectio
                         mime="image/jpeg",
                         key=f"download_{idx}"
                     )
+                    detected_images.append(annotated_np)  # Store the annotated detected image
                 except Exception as e:
                     st.error(f"❌ Face detection error for Image {idx + 1}: {e}")
                     logger.error(f"Detection Error: {e}")
             st.session_state.total_faces_detected = total_faces
+            st.session_state.all_faces = all_faces  # Store detected faces
+            st.session_state.scales = scales  # Store scales
+            st.session_state.detected_images = detected_images  # Store detected images
+
+    # --- Face Recognition for Images ---
+    if hasattr(st.session_state, 'all_faces') and any(faces for faces in st.session_state.all_faces):
+        if st.button("🤖 Recognize Faces"):
+            with st.spinner("Recognizing faces..."):
+                if model_choice != "MTCNN" or recognizer is None or recognizer.reference_embedding is None:
+                    st.warning("⚠️ Face recognition requires MTCNN, a valid reference image, and detected faces. Please ensure all conditions are met.")
+                else:
+                    total_faces = 0
+                    st.session_state.cropped_faces = []  # Reset cropped faces
+                    for idx, (pil_image, source) in enumerate(st.session_state.captured_images):
+                        try:
+                            image_np = np.array(pil_image.convert("RGB"), dtype=np.uint8)
+                            scale = st.session_state.scales[idx]
+                            faces = st.session_state.all_faces[idx]
+                            if not faces:
+                                st.warning(f"😕 No faces detected in Image {idx + 1} to recognize.")
+                                continue
+                            # Use clean image copy for annotations
+                            annotated_np = image_np.copy()
+                            count = 0
+                            # Crop faces using MTCNN for recognition
+                            faces_cropped = st.session_state.mtcnn_detector(image_np, save_path=None)
+                            if faces_cropped is None or len(faces_cropped) == 0:
+                                st.warning(f"😕 No faces cropped for recognition in Image {idx + 1}.")
+                                continue
+                            for i, (face, face_tensor) in enumerate(zip(faces, faces_cropped)):
+                                if i >= len(faces):
+                                    logger.debug(f"Skipping extra cropped face {i+1}: detected {len(faces)} faces")
+                                    break
+                                x, y, width, height = face['box']
+                                confidence = face['confidence']
+                                if confidence < confidence_threshold:
+                                    continue
+                                x, y = max(0, int(x / scale)), max(0, int(y / scale))
+                                width, height = int(width / scale), int(height / scale)
+                                x_end, y_end = min(x + width, image_np.shape[1]), min(y + height, image_np.shape[0])
+                                x, y = max(0, x), max(0, y)
+                                width, height = x_end - x, y_end - y
+                                if width <= 0 or height <= 0:
+                                    continue
+                                # Perform recognition
+                                if face_tensor.shape != (3, 160, 160):
+                                    logger.error(f"Invalid face tensor shape for face {i+1}: {face_tensor.shape}")
+                                    continue
+                                if torch.cuda.is_available():
+                                    face_tensor = face_tensor.cuda()
+                                is_match, similarity = recognizer.recognize_face(face_tensor)
+                                # Draw annotations
+                                from utils.image_utils import draw_rectangle, draw_text, draw_circle
+                                box_color = recognizer.match_color_rgb if is_match else recognizer.no_match_color_rgb
+                                text = f"{'Match' if is_match else 'No Match'} ({similarity:.2f})"
+                                draw_rectangle(annotated_np, (x, y), (x + width, y + height), box_color)
+                                draw_text(annotated_np, text, (x, y - 10), box_color)
+                                if show_landmarks:
+                                    for key, (px, py) in face['keypoints'].items():
+                                        px, py = int(px / scale), int(py / scale)
+                                        draw_circle(annotated_np, (px, py), hex_to_rgb(landmark_color))
+                                count += 1
+                                # Store cropped face
+                                face_np = face_tensor.cpu().permute(1, 2, 0).numpy()
+                                face_np = (face_np * 255).astype(np.uint8)
+                                st.session_state.cropped_faces.append({
+                                    'image': face_np,
+                                    'caption': f"Recognized Face {i+1}: {'Match' if is_match else 'No Match'} ({similarity:.2f})"
+                                })
+                            total_faces += count
+                            st.image(annotated_np, caption=f"Image {idx + 1}: Recognized {count} face(s)", use_container_width=True)
+                            st.success(f"✅ Image {idx + 1}: Recognized {count} face(s)")
+                            # Display cropped faces
+                            if st.session_state.cropped_faces:
+                                st.markdown("### Recognized Faces")
+                                cols = st.columns(min(len(st.session_state.cropped_faces), 3))
+                                for i, cropped_face in enumerate(st.session_state.cropped_faces):
+                                    with cols[i % 3]:
+                                        st.image(cropped_face['image'], caption=cropped_face['caption'], use_container_width=True)
+                        except Exception as e:
+                            st.error(f"❌ Face recognition error for Image {idx + 1}: {e}")
+                            logger.error(f"Recognition Error: {e}")
+                    st.session_state.total_faces_detected = total_faces
 
 # --- Clear Session ---
 if st.button("Clear"):

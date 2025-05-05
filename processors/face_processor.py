@@ -73,14 +73,34 @@ class FaceDetectionProcessor(VideoProcessorBase):
         self.dlib_detector = st.session_state.dlib_detector
         self.dlib_predictor = st.session_state.dlib_predictor
 
+    #################
+    # def preprocess_frame(self, image):
+    #    """Normalize brightness and contrast of the input frame."""
+    #    try:
+    #        img_lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
+    #        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    #        img_lab[:, :, 0] = clahe.apply(img_lab[:, :, 0])
+    #        img_normalized = cv2.cvtColor(img_lab, cv2.COLOR_LAB2RGB)
+    #        return img_normalized
+    #    except Exception as e:
+    #        logger.error(f"Frame Preprocessing Error: {e}")
+    #        return image
+    #################
     def preprocess_frame(self, image):
-        """Normalize brightness and contrast of the input frame."""
+        """Enhance the live camera feed quality with sharpening and denoising."""
         try:
-            img_lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            img_lab[:, :, 0] = clahe.apply(img_lab[:, :, 0])
-            img_normalized = cv2.cvtColor(img_lab, cv2.COLOR_LAB2RGB)
-            return img_normalized
+            # Ensure image is in BGR format (as received from recv)
+            # Apply light denoising to reduce noise without blurring details
+            denoised = cv2.fastNlMeansDenoisingColored(image, None, h=5, hColor=5, templateWindowSize=7, searchWindowSize=15)
+            
+            # Apply a subtle sharpening filter
+            # Create a sharpening kernel
+            kernel = np.array([[0, -1, 0],
+                              [-1, 5, -1],
+                              [0, -1, 0]], dtype=np.float32)
+            sharpened = cv2.filter2D(denoised, -1, kernel)
+            
+            return sharpened
         except Exception as e:
             logger.error(f"Frame Preprocessing Error: {e}")
             return image
@@ -156,14 +176,65 @@ class FaceDetectionProcessor(VideoProcessorBase):
 
         return faces
 
+    # def recv(self, frame):
+    #     try:
+    #         img = frame.to_ndarray(format="bgr24")
+    #         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    #         # Preprocess frame
+    #         img_rgb = self.preprocess_frame(img_rgb)
+    #         img_processed, scale = preprocess_image(img_rgb)
+    #         faces = self.process_frame(img_processed, scale)
+    #         count = 0
+    #         for face in faces:
+    #             x, y, width, height = face['box']
+    #             confidence = face['confidence']
+    #             if self.model_choice == "MTCNN" and confidence < self.confidence_threshold:
+    #                 logger.debug(f"Skipping face with low confidence: {confidence:.2f}")
+    #                 continue
+    #             x, y = max(0, int(x / scale)), max(0, int(y / scale))
+    #             width, height = int(width / scale), int(height / scale)
+    #             x_end, y_end = min(x + width, img_rgb.shape[1]), min(y + height, img_rgb.shape[0])
+    #             x, y = max(0, x), max(0, y)
+    #             width, height = x_end - x, y_end - y
+    #             if width <= 0 or height <= 0:
+    #                 logger.debug(f"Skipping invalid bounding box: x={x}, y={y}, width={width}, height={height}")
+    #                 continue
+    #             from utils.image_utils import draw_rectangle, draw_text, draw_circle
+    #             # Use detection-only annotations if recognizer is None
+    #             if self.recognizer is None:
+    #                 box_color = self.box_color_rgb
+    #                 text = f"{confidence:.2f}"
+    #             else:
+    #                 box_color = self.match_color_rgb if 'is_match' in face and face['is_match'] else self.no_match_color_rgb if 'is_match' in face else self.box_color_rgb
+    #                 text = f"{'Match' if 'is_match' in face and face['is_match'] else 'No Match'} ({face['similarity']:.2f})" if 'is_match' in face else f"{confidence:.2f}"
+    #             try:
+    #                 draw_rectangle(img_rgb, (x, y), (x + width, y + height), box_color)
+    #                 draw_text(img_rgb, text, (x, y - 10), box_color)
+    #                 if self.show_landmarks:
+    #                     for key, (px, py) in face['keypoints'].items():
+    #                         px, py = int(px / scale), int(py / scale)
+    #                         draw_circle(img_rgb, (px, py), self.landmark_color_rgb)
+    #                 count += 1
+    #             except Exception as e:
+    #                 logger.error(f"Rendering Error for face {count+1}: {e}")
+    #                 continue
+    #         st.session_state.total_faces_detected = count
+    #         logger.debug(f"Processed frame: detected {count} faces")
+    #         # Trigger rerun only if in Face Recognition mode and new faces were added
+    #         if self.recognizer is not None and st.session_state.get('_update_cropped_faces', False):
+    #             st.session_state._update_cropped_faces = False
+    #             st.rerun()
+    #         return av.VideoFrame.from_ndarray(cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR), format="bgr24")
+    #     except Exception as e:
+    #         logger.error(f"Real-time detection error: {e}")
+    #         st.error(f"❌ Real-time detection error: {e}")
+    #         return frame
+
     def recv(self, frame):
         try:
             img = frame.to_ndarray(format="bgr24")
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            # Preprocess frame
-            img_rgb = self.preprocess_frame(img_rgb)
-            img_processed, scale = preprocess_image(img_rgb)
-            faces = self.process_frame(img_processed, scale)
+            # Skip preprocessing to preserve original feed
+            faces = self.process_frame(img, scale=1.0)  # Use original image with scale=1.0
             count = 0
             for face in faces:
                 x, y, width, height = face['box']
@@ -171,9 +242,9 @@ class FaceDetectionProcessor(VideoProcessorBase):
                 if self.model_choice == "MTCNN" and confidence < self.confidence_threshold:
                     logger.debug(f"Skipping face with low confidence: {confidence:.2f}")
                     continue
-                x, y = max(0, int(x / scale)), max(0, int(y / scale))
-                width, height = int(width / scale), int(height / scale)
-                x_end, y_end = min(x + width, img_rgb.shape[1]), min(y + height, img_rgb.shape[0])
+                x, y = max(0, int(x)), max(0, int(y))  # No scaling
+                width, height = int(width), int(height)  # No scaling
+                x_end, y_end = min(x + width, img.shape[1]), min(y + height, img.shape[0])
                 x, y = max(0, x), max(0, y)
                 width, height = x_end - x, y_end - y
                 if width <= 0 or height <= 0:
@@ -187,24 +258,23 @@ class FaceDetectionProcessor(VideoProcessorBase):
                 else:
                     box_color = self.match_color_rgb if 'is_match' in face and face['is_match'] else self.no_match_color_rgb if 'is_match' in face else self.box_color_rgb
                     text = f"{'Match' if 'is_match' in face and face['is_match'] else 'No Match'} ({face['similarity']:.2f})" if 'is_match' in face else f"{confidence:.2f}"
+                # Convert RGB colors to BGR for drawing on BGR image
+                box_color_bgr = (box_color[2], box_color[1], box_color[0])  # Swap R and B channels
+                landmark_color_bgr = (self.landmark_color_rgb[2], self.landmark_color_rgb[1], self.landmark_color_rgb[0])  # Swap R and B channels
                 try:
-                    draw_rectangle(img_rgb, (x, y), (x + width, y + height), box_color)
-                    draw_text(img_rgb, text, (x, y - 10), box_color)
+                    draw_rectangle(img, (x, y), (x + width, y + height), box_color_bgr)
+                    draw_text(img, text, (x, y - 10), box_color_bgr)
                     if self.show_landmarks:
                         for key, (px, py) in face['keypoints'].items():
-                            px, py = int(px / scale), int(py / scale)
-                            draw_circle(img_rgb, (px, py), self.landmark_color_rgb)
+                            px, py = int(px), int(py)  # No scaling
+                            draw_circle(img, (px, py), landmark_color_bgr)
                     count += 1
                 except Exception as e:
                     logger.error(f"Rendering Error for face {count+1}: {e}")
                     continue
             st.session_state.total_faces_detected = count
             logger.debug(f"Processed frame: detected {count} faces")
-            # Trigger rerun only if in Face Recognition mode and new faces were added
-            if self.recognizer is not None and st.session_state.get('_update_cropped_faces', False):
-                st.session_state._update_cropped_faces = False
-                st.rerun()
-            return av.VideoFrame.from_ndarray(cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR), format="bgr24")
+            return av.VideoFrame.from_ndarray(img, format="bgr24")  # Return original format without RGB2BGR conversion
         except Exception as e:
             logger.error(f"Real-time detection error: {e}")
             st.error(f"❌ Real-time detection error: {e}")
